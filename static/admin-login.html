@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LENS Lab · 管理员登录</title>
+  <link rel="stylesheet" href="/static/style.css?v=admin-login-20261020">
+</head>
+<body>
+  <header class="topbar"><div class="wrap topbar-inner"><strong>LENS Lab</strong><span>研究者后台</span><a href="/">参与者界面</a></div></header>
+  <main class="wrap admin-login-main">
+    <section class="hero"><p class="eyebrow">研究控制台</p><h1>管理员登录</h1><p>使用管理员账号查看实验记录、审核数据和管理任务。</p></section>
+    <section class="card" aria-labelledby="login-heading">
+      <h2 id="login-heading">登录研究者后台</h2>
+      <form id="admin-login-form" class="admin-login-form" action="/admin/login" method="post">
+        <label for="admin-username">用户名</label>
+        <input id="admin-username" name="username" type="text" value="admin" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="80">
+        <label for="admin-password">密码</label>
+        <input id="admin-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+        <p id="login-error" class="error" role="alert"></p>
+        <p id="login-status" class="muted" role="status" aria-live="polite"></p>
+        <button id="login-button" class="primary" type="submit">登录</button>
+      </form>
+      <noscript><p class="error">请启用浏览器的 JavaScript 后登录。</p></noscript>
+    </section>
+  </main>
+  <script src="/static/admin-login.js?v=admin-login-20261020" defer></script>
+</body>
+</html>

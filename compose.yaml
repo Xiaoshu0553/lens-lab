@@ -1,0 +1,40 @@
+services:
+  app:
+    build:
+      context: .
+      network: host
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./synthetic-datasets:/app/synthetic-datasets:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/info', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    environment:
+      STUDY_DOMAIN: ${STUDY_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
