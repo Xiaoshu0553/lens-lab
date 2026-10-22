@@ -319,19 +319,19 @@ pilot/live 的接口失败不会默默改用规则演示，也不会把会话改
 
 所有导出均需管理员认证。常用 raw／analysis 导出采用固定精简字段及永久record_id；analysis 按当前配置、完整30题作答及客观完成自动筛选，raw 保留更广范围的已有记录，包括未完成或历史记录。完整archive-export保存内部ID、任务快照、消息、事件、请求与审核历史，不应把常用精简表误当完整归档。研究者试跑不进入普通完成分析。
 
-页面五项常用导出为记录CSV／JSON、已完成记录CSV及对话CSV／JSON，均直接读取同一数据库。常用记录CSV每行一次会话，中文表头；JSON为英文键。逐题答案在常用表中为1—4选项位置，归档中的原始向量从0起。独立dialogue-export JSON按会话保存消息数组，CSV按消息逐行，以record_id连接；消息原文和UTC／北京时间并存。完整归档的快照、消息、事件等以JSON字符串保存，需二次解析。常用表和对话表均保留来源、合成标记、模拟时间及正式分析资格。
+页面五项常用导出为记录CSV／JSON、已完成记录CSV及对话CSV／JSON，均直接读取同一数据库。常用记录CSV每行一次会话，中文表头；JSON为英文键。逐题答案在常用表中为1—4选项位置，归档中的原始向量从0起。独立dialogue-export JSON按会话保存消息数组，CSV按消息逐行，以record_id连接；消息原文和UTC／北京时间并存。完整归档的快照、消息、事件等以JSON字符串保存，需二次解析。三类常用CSV仅留业务列，省略来源和内部分析资格；常用JSON及完整归档保留来源、时间标记及资格。
 
 删除应展示具体会话范围和完成结果；备份中的删除策略需事先说明。原型已支持按会话删除会话、消息、事件与审核历史，完整版本还应记录最小化操作审计信息并验证备份保留及恢复后的删除一致性。
 
 ## 10.5 当前合成展示与正式分析资格
 
-当前批次student-126-20261022-v2含126条合成完成记录，三个年龄区间各42条，每区间S／A各21条、总计各63条。仅前测答案和决策先生成再独立分组，不按目标均分调节；旧600条、跨年龄126条及V1不重标或复用。研究设计及学生材料版本不变。
+当前批次student-126-20261022-v3含126条完成记录，三个年龄区间各42条、S／A各63条。保留V2前测、决策、人口属性、分组、情景和模拟起止时点，沿用个人随机键，只重编人工对话，不按均分调分。旧600条、跨年龄资料及V1不重标；研究设计和学生材料版本不变。
 
-人工对话另预设A组先两轮各问一个必要事实（既往名额、每周到场），补齐后继续原问题并给5张线索；S组用户主动补齐两事实后取得3张。两组分别8轮和5轮，总线索315／189条，每个evidence_reveal对应实际模板正文。线索差是人工展示假设，不是实测干预效应。
+人工过程预设逐条A2–8次、S1–5次来源，范围重叠；每卡最多两次且不连续，允许间隔复核，年龄兴趣权重不同。初始可给无、一项或两项事实；A只问未给事实0–2次，补齐即继续回答，S不主动问。实际A3–10轮、S2–8轮，总线索308／195次，每次事件对应模板正文。这是展示假设，不是实测效应。
 
-对话不是实际模型输出，任务时点为模拟值；前测耗时和实测模型延迟为空。is_synthetic=1、record_kind及data_origin为synthetic，platform_analysis_eligible=0；展示可计算showcase_analysis_eligible=true，正式analysis_eligible=false。kind=analysis可返回展示记录，不能凭接口名当作真实样本；导出保留来源及资格标记。
+未调用模型，前测耗时和实测延迟为空；JSON及归档保留is_synthetic、data_origin、时间标记及正式分析资格0，三类CSV只留业务列。kind=analysis可返回可计算展示记录，不能凭接口名当作真实样本。
 
-来源接口/api/admin/synthetic-datasets及synthetic-export保留冻结材料、manifest与说明供核验；页面五项下载直接读V2库，不重复列来源目录。manifest记录evidence_policy_is_simulated_assumption=true及每条S3／A5卡。模拟分差、时长和题项分布均不是招募、信效度或干预证据；普通demo也须按模式与来源单独解释。
+来源接口保留冻结材料、manifest、父批次及个人指纹供复核；五项下载读取同一V3库，不重复列来源目录。manifest如实保存逐条过程规则与人工假设，不再固定S3／A5卡。分差、时长和题项分布不构成招募、信效度或干预证据；普通demo仍按模式与来源单独解释。
 
 # 十一 结果指标 评分与公平性评价
 
@@ -500,7 +500,7 @@ demo 模式允许明确标识的规则演示；pilot 和 live 使用真实模型
 
 compose.yaml将宿主university-data挂载到容器/app/data，显式DATABASE_PATH=/app/data/lens.sqlite3。compose.preview.yaml附加真实模型试跑隔离。compose.showcase.yaml将university-showcase-data挂载到/app/university-showcase-data，DATABASE_PATH=/app/university-showcase-data/showcase.sqlite3，配合SHOWCASE_MODE=1及demo运行；新保护逻辑拒绝旧showcase-data路径，不能仅改宿主目录仍用旧容器路径。
 
-旧data、showcase-data、600条来源、V1及临时库先做一致性备份并转存服务器外私有位置，核验后从服务器移除；旧答案和对话不重写。V2使用全新展示库，不复用V1收据。服务器仅保留两个当前学生数据目录，Compose不再挂载synthetic-datasets。新真实试跑和合成展示使用不同库；研究者试跑record_kind=researcher_preview，不进入普通participant分析。live模式会自动准备带独立-live标识的学生候选任务，正式招募前仍须审查和冻结；若要正式招募，须配置live、真实模型和参与口令，并完成研究准备，不能把现有管理员试跑入口直接当作正式收集入口。
+旧data、showcase-data、600条来源、V1、V2及临时库先做一致性备份并转存服务器外私有位置，核验后从服务器移除；旧答案和对话不重写。V3使用新展示库与新批次收据，保留V2个人业务数据，旧收据不复用。服务器仅保留两个当前学生数据目录，Compose不再挂载synthetic-datasets。新真实试跑和合成展示使用不同库；研究者试跑record_kind=researcher_preview，不进入普通participant分析。live模式会自动准备带独立-live标识的学生候选任务，正式招募前仍须审查和冻结；若要正式招募，须配置live、真实模型和参与口令，并完成研究准备，不能把现有管理员试跑入口直接当作正式收集入口。
 
 # 十六 隐私 安全与研究伦理
 
@@ -514,7 +514,7 @@ compose.yaml将宿主university-data挂载到容器/app/data，显式DATABASE_PA
 
 浏览器渲染模型和用户内容时避免执行 HTML 或脚本；导出 CSV 应处理公式注入；当前接口限制消息长度和同会话进行中的重复请求，会话标识兼访问凭证；通用频率限制与更细授权仍需补强。资料和用户输入均视为数据，不能让其中的指令修改系统权限、评分或获取其他会话。
 
-API 密钥、数据库、原始对话及真实研究导出不进入公开代码仓库。公开演示仅使用合成案例，下载及机器来源元数据保留合成标记；公开研究数据前开展脱敏和再识别检查。向模型服务发送的数据仅限当前任务所需，不包含前测能力标签、凭证或未授权资料。
+API 密钥、数据库、原始对话及真实研究导出不进入公开代码仓库。公开演示仅使用合成案例，常用JSON及完整归档保留来源标记，三类常用CSV仅含业务列；公开研究数据前开展脱敏和再识别检查。向模型服务发送的数据仅限当前任务所需，不包含前测能力标签、凭证或未授权资料。
 
 保留期限、备份期限和删除范围在正式同意材料中写明具体值，不能长期使用“后续确定”。本人会话删除API和页面入口已实现；仍须完善最小化删除审计、备份保留及恢复后的删除一致性。删除是否影响已经形成的汇总结果应事先告知。
 
@@ -587,15 +587,15 @@ API 密钥、数据库、原始对话及真实研究导出不进入公开代码�
 
 # 附录一 核心数据字典
 
-下表区分常用精简表、完整归档与建议新增字段。常用CSV采用中文表头、JSON采用英文键，以当前schema为准；内部凭证、完整来源及快照只在认证归档中提供。
+下表区分常用精简表、完整归档与建议新增字段。常用CSV采用中文表头、JSON采用英文键，以当前schema为准；内部凭证及快照仅在认证归档提供，来源与资格见常用JSON及归档，三类CSV省略这些列。
 
 |字段或字段组|含义与类型|缺失及使用规则|
 |record_id|常用表永久记录编号 如R0001|多表连接 删除后不复用 不代表独立人数|
 |id|内部随机会话标识兼访问凭证|只在完整归档提供 不公开分享|
-|record_kind 与 data_origin|participant／researcher_preview／synthetic等来源|真实参与 试跑 合成分开|
-|is_synthetic 与 timestamp_is_simulated|合成及模拟时点标记|不得因精简导出而丢失|
-|analysis_eligible 与 platform_analysis_eligible|正式参与者分析资格|合成固定为false／0|
-|showcase_analysis_eligible|当前合成展示统计可计算|不能代替正式分析资格|
+|record_kind 与 data_origin|participant／researcher_preview／synthetic等来源|仅JSON及归档 真实参与 试跑 合成分开|
+|is_synthetic 与 timestamp_is_simulated|合成及模拟时点标记|JSON及归档保留 常用CSV不含|
+|analysis_eligible 与 platform_analysis_eligible|正式参与者分析资格|合成固定false／0 常用CSV不含|
+|showcase_analysis_eligible|当前合成展示统计可计算|仅JSON及归档 不能代替正式资格|
 |task_id|任务标识 版本在任务快照 version 中|旧记录继续绑定旧任务|
 |task_snapshot_json|创建时任务资料和评分配置 JSON 字符串|不可用当前任务覆盖|
 |run_mode 与 is_demo|运行模式和材料阶段标记|pilot也可能is_demo为1 不能仅凭该字段判断合成|

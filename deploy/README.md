@@ -54,9 +54,9 @@ docker compose -f compose.showcase.yaml up -d --build showcase
 docker compose -f compose.showcase.yaml ps showcase
 ```
 
-宿主 `university-showcase-data/` 挂载到容器 `/app/university-showcase-data`，端口为 `127.0.0.1:8001`。数据库必须使用专用名称 `showcase.sqlite3`，不得指向真实研究库。合成下载目录只列当前 `university-v1`、批次 `student-126-20261022-v2`；旧 600 条数据及旧生成器属于历史归档。
+宿主 `university-showcase-data/` 挂载到容器 `/app/university-showcase-data`，端口为 `127.0.0.1:8001`。数据库必须使用专用名称 `showcase.sqlite3`，不得指向真实研究库。合成下载目录只列当前 `university-v1`、批次 `student-126-20261022-v3`；旧 600 条数据及旧生成器属于历史归档。
 
-V2 仍为 126 条完成记录，前测答案和决策在独立分组前生成。人工对话规则预设 A 组先分两轮各追问一个必要事实，再给出 5 张线索；S 组在用户主动补充两项事实后给出 3 张线索。每个 `evidence_reveal` 都对应实际模板回复，A／S 线索差是人工展示假设，不能证明真实模型或用户的组间效应。前测耗时、实测模型延迟保持空值；过程提醒从答案及对话派生，不自动排除记录。普通 `demo` 不自动填充这些记录。
+V3保留V2的126条前测、决策、人口属性、分组及模拟时点，仅重编对话过程。逐条A组2–8次、S组1–5次来源，范围重叠；每卡最多两次且不连续，年龄区间使用不同兴趣权重。初始事实可为空、仅既往名额、仅每周到场或两项均有；A只询问未给事实0–2次，S不主动问。每次 `evidence_reveal` 对应实际模板回复；过程规则是人工展示假设，不证明真实模型或用户效应，也不调节个人分数。前测耗时、实测模型延迟保持空值；过程提醒从答案及对话派生，不自动排除记录。普通 `demo` 不自动填充这些记录。
 
 ## HTTPS 与反向代理
 
@@ -83,7 +83,7 @@ docker compose --profile https up -d --build
 | 当前 126 条合成展示 | `/opt/lens_lab/university-showcase-data/showcase.sqlite3` | `/app/university-showcase-data/showcase.sqlite3` |
 | 旧研究库／旧展示库／旧来源包 | 服务器外私有备份 | 不挂载到当前实例 |
 
-先停止旧实例，对数据库与配置做一致性备份并转存到服务器外的私有位置，核验可恢复后移除服务器旧 `data/`、`showcase-data/`、旧 600 条来源包、V1 展示库及临时库；不得先删除后补备份。V1 收据不能用于 V2，须建立全新的 V2 展示库；当前服务器仅保留 `university-data/` 和 `university-showcase-data/` 两个运行数据目录。两个 Compose 服务均不再挂载旧 `synthetic-datasets/`。两个实例须使用相同的 `ADMIN_PASSWORD` 和兼容的管理员 Cookie 格式，以便沿用同域登录。分别检查并更新两个实例：
+先停止旧实例，对数据库与配置做一致性备份并转存到服务器外的私有位置，核验可恢复后移除服务器旧 `data/`、`showcase-data/`、旧 600 条来源包、V1、V2 展示库及临时库；不得先删除后补备份。旧批次收据不能用于V3，须建立全新的V3展示库；当前服务器仅保留 `university-data/` 和 `university-showcase-data/` 两个运行数据目录。两个 Compose 服务均不再挂载旧 `synthetic-datasets/`。两个实例须使用相同的 `ADMIN_PASSWORD` 和兼容的管理员 Cookie 格式，以便沿用同域登录。分别检查并更新两个实例：
 
 ```bash
 docker compose -f compose.yaml -f compose.preview.yaml config --quiet
@@ -102,7 +102,7 @@ include /opt/lens_lab/deploy/nginx-preview-routes.conf;
 
 片段增加三个路由：`/admin/preview` 和 `/static/app.js` 转到真实试跑实例；`/preview-api/` 转发时剥离前缀。`location /` 继续转发到 8001，但其上游应为新版大学生展示实例。保留 Host、来源地址和 HTTPS 协议，不为此 API 前缀开放跨域；已有同名路由时先合并，检查配置通过后重载。
 
-验证时登录后台打开 `/admin/preview`，核对三年龄区间和专科／本科、共同 30 题、在读确认，以及 `/preview-api/api/...` 请求。新会话应标记 `researcher_preview` 并使用真实模型；退出登录后 API 应拒绝访问。根站后台和五项常用导出应连接同一个 V2 数据库，记录编号、分数、对话及线索计数一致；下载与机器元数据保留合成来源，不将旧 600 条或 V1 展示为当前数据。前端存储使用新的 `lens_university_v1_*` 命名空间，不续接旧跨年龄会话。
+验证时登录后台打开 `/admin/preview`，核对三年龄区间和专科／本科、共同 30 题、在读确认，以及 `/preview-api/api/...` 请求。新会话应标记 `researcher_preview` 并使用真实模型；退出登录后 API 应拒绝访问。根站后台和五项常用导出应连接同一个 V3 数据库，记录编号、分数、对话及线索计数一致；三类常用CSV仅含业务列，常用JSON与完整归档机器元数据保留来源和资格，不将旧 600 条或 V1 展示为当前数据。前端存储使用新的 `lens_university_v1_*` 命名空间，不续接旧跨年龄会话。
 
 ## 更新与一致性备份
 

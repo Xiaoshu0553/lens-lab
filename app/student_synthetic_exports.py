@@ -29,7 +29,8 @@ EXPORT_FILES = {
 }
 EXPECTED_COUNTS = {"total": RECORD_COUNT, "completed": RECORD_COUNT, "dropout": 0}
 CALIBRATION_NOTE = (
-    "本批次未使用旧600人或旧126人作答，不按目标均值校准，不预设澄清组得分更高。"
+    "本批次未使用旧跨年龄600人或126人作答；V3保留V2大学生合成作答，单独重编对话过程。"
+    "不按目标均值校准，不预设澄清组得分更高。"
     "模拟分差只由固定生成规则产生，不能作为干预效果或研究发现。" + EVIDENCE_POLICY
 )
 
@@ -50,18 +51,31 @@ def _readme(dataset: dict) -> str:
 126条均为合成完成记录；没有真实招募、实际参与者或模型调用。
 合成身份中的在读确认值不能作为真实学生身份验证。
 
-独立来源：全部重新生成，未读取、改写或重新包装旧跨年龄600/126条记录。
-先用固定seed从新版30题材料生成答案，并抽样最终参加和办理选项，再独立分配实验组。
+独立来源：未读取、改写或重新包装旧跨年龄600/126条记录。
+V3沿用V2大学生合成批次{manifest['parent_source_batch_id']}中的逐人作答、决策、
+人口属性、情景、分组与起止时点，仅重新编写对话过程；V2来源本身不是实际受试者数据。
+基础作答使用原V2个人随机键复算：先从新版30题材料生成答案和最终选项，再独立分配实验组。
 同一生成规则用于两组，答题概率与决策抽样概率不读取实验组。
 没有按均分、组差或显著性选样，没有重试seed。
 两组对话与来源展示均为人工编写的过程示例，不是模型遵从率的实测结果。
 
-V2过程生成假设：{manifest['evidence_policy']}
-A组每轮只问一个事实，两个事实补齐后继续作答；S组可以主动提供这两项事实。
+V3过程生成假设：{manifest['evidence_policy']}
+独立对话seed：{manifest['dialogue_seed']}，逐人的原V2编号作随机键，首次抽样后不重试。
+起始可能未给事实、只给既往名额、只给每周可到场次数，或者已给全两项事实。
+A组只澄清缺少的事实，每轮最多一项，补齐即继续；已知条件不重复追问。
+S组不主动追问，未知事实仅给条件规则，由用户在开头或后续主动补充。
+来源选择按年龄兴趣权重固定抽样，每条同卡最多两次、间隔复核，不要求两组每人次数相等。
+轮次、开头、问法、事实补充路径和复核顺序由固定独立随机流生成，全部不超过12轮。
 AI资料线索次数按实际模板回复中的明确来源卡片与对应evidence_reveal事件复算，
-不是按组别直接填入汇总。各年龄区间A组每条目标来源出现21次，S组轮转3条来源，
-各来源出现次数均少于21；这些差异是人工设定的过程假设，不是观察到的干预效果。
+不是按组别直接填入汇总；重复展示按次数计，不同来源卡数另行去重。
+当前A组线索共{manifest['evidence_reveal_totals']['A']}次，S组共{manifest['evidence_reveal_totals']['S']}次，
+各年龄及各来源次数见生成清单；这些差异是人工设定的过程假设，不是观察到的干预效果。
 答案与最终决策的抽样不读取组别，也不因这项过程假设重新调分。
+
+父批次个人字段指纹：{manifest['parent_profiles_sha256']}
+指纹字段：{', '.join(manifest['parent_profile_fields'])}。
+逐条parent_record_id指向原V2编号，parent_profile_sha256核对相应字段；
+新批次只可导入全新独立数据库，不能覆盖旧批次或实际参与者记录。
 
 全部记录的is_synthetic=1、record_kind=synthetic、data_origin=synthetic、
 platform_analysis_eligible=0。所有日期与作答/对话/决策时长都是模拟值。
@@ -152,7 +166,9 @@ def register_student_synthetic_exports(app: FastAPI, require_admin: Callable,
         manifest = get_student_dataset()["manifest"]
         return {"datasets": [{
             "id": BATCH_ID, "source_batch_id": BATCH_ID, "design_version": manifest["design_version"],
-            "label": "126条大学生合成数据（V2过程假设）", "is_synthetic": True,
+            "label": "126条大学生合成数据（V3差异过程假设）", "is_synthetic": True,
+            "parent_source_batch_id": manifest["parent_source_batch_id"],
+            "parent_profiles_sha256": manifest["parent_profiles_sha256"],
             "data_origin": "synthetic", "record_kind": "synthetic",
             "platform_database_imported": None, "platform_database_inspected": False,
             "available": True, "verification_status": "deterministic_student_batch_frozen_materials",

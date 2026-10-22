@@ -56,6 +56,17 @@ DIALOGUE_COLUMNS = tuple(column for column in RECORD_COLUMNS if column[0] in DIA
     ("created_at_beijing", "消息时间(北京时间)"),
 )
 
+# Routine CSV files contain the fields used to review the task and conversation.
+# JSON and the authenticated archive retain the original source and eligibility
+# metadata; omitting these columns must never relabel a record's source.
+CSV_OMITTED_KEYS = frozenset({
+    "record_kind", "is_synthetic", "source_batch_id", "data_origin", "timestamp_is_simulated",
+    "platform_analysis_eligible", "showcase_analysis_eligible", "analysis_eligible",
+    "analysis_exclusion_reasons",
+})
+RECORD_CSV_COLUMNS = tuple(column for column in RECORD_COLUMNS if column[0] not in CSV_OMITTED_KEYS)
+DIALOGUE_CSV_COLUMNS = tuple(column for column in DIALOGUE_COLUMNS if column[0] not in CSV_OMITTED_KEYS)
+
 
 def assign_record_alias(db, session_id):
     """Append once inside the session-creation transaction; never reuse a number."""
@@ -204,6 +215,7 @@ def _csv_value(key, value):
 
 
 def chinese_csv(records, columns):
+    columns = tuple(column for column in columns if column[0] not in CSV_OMITTED_KEYS)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(label for _key, label in columns)

@@ -48,12 +48,12 @@
 | 统一问卷 | `student-literacy-v1-30`，30 道独立题目 |
 | 统一任务 | `student-campus-v1`，4 个私事实情景 |
 | 研究者材料审查 | `student-material-review-v1`，含答案与私事实，仅认证研究者可见 |
-| 当前合成批次 | `student-126-20261022-v2`，126 条大学生模拟记录 |
+| 当前合成批次 | `student-126-20261022-v3`，126 条大学生模拟记录 |
 | 浏览器存储 | 新 `lens_university_v1_*` 命名空间，参与者和试跑再隔离 |
 
 任务、选项、评分与私事实以任务会话快照保存；真实前测保存问卷版本及逐题答案，完整题文由版本化源码和发布材料保存，尚无逐会话问卷题文快照。旧作答、分数、任务快照及对话不得按新材料重写。旧跨年龄模块和历史审查仅供兼容／归档，不进入当前参与者材料、当前下载目录或新方案结果。
 
-当前真实模型试跑使用独立 `university-data/lens.sqlite3`；当前合成展示使用 `university-showcase-data/showcase.sqlite3`。旧 `data/`、`showcase-data/`、600 条来源包和 V1 展示数据应先转存到服务器外私有备份并核验，再从服务器移除；不导入新库。服务器仅保留两个当前学生运行数据目录，Compose 不再挂载旧来源目录。同一服务内也按版本、运行模式、模型配置和记录来源筛选。`demo`／`pilot`／`live` 及真实／合成来源不得合并作实证推断。
+当前真实模型试跑使用独立 `university-data/lens.sqlite3`；当前合成展示使用 `university-showcase-data/showcase.sqlite3`。旧 `data/`、`showcase-data/`、600 条来源包及V1、V2展示数据应先转存到服务器外私有备份并核验，再从服务器移除；不导入新库。服务器仅保留两个当前学生运行数据目录，Compose 不再挂载旧来源目录。同一服务内也按版本、运行模式、模型配置和记录来源筛选。`demo`／`pilot`／`live` 及真实／合成来源不得合并作实证推断。
 
 ## 时间与过程计数
 
@@ -84,9 +84,9 @@
 | `/api/admin/synthetic-datasets` | 仅当前大学生合成批次的可下载清单 |
 | `/api/admin/synthetic-export?file=csv` | 当前批次合成导出，不是受试者研究导出 |
 
-研究导出的 `kind` 为 `raw`／`analysis`，`format` 为 `csv`／`json`。字段按人口信息、实验条件、30 题答案、结果、过程及时间排列；CSV 使用中文表头，JSON 使用英文键，以实际导出表头及版本为准。
+研究导出的 `kind` 为 `raw`／`analysis`，`format` 为 `csv`／`json`。字段按人口信息、实验条件、30题答案、结果、过程及时间排列。三类常用CSV为记录、已完成记录和对话，使用中文表头，仅保留业务列，省略 record_kind、is_synthetic、source_batch_id、data_origin、timestamp_is_simulated、platform_analysis_eligible、showcase_analysis_eligible、analysis_eligible、analysis_exclusion_reasons 九列。常用JSON及完整归档仍保留来源与内部资格，JSON使用英文键，以实际schema为准。
 
-常用页面和导出通过永久 `record_id` 连接，新记录追加编号，删除后不复用。独立对话 JSON 按会话保存，CSV 按消息逐行；内部 ID 与来源保留在受认证保护的归档中。分析纳入由当前版本、完整问卷及最终客观提交自动确定，不依赖人工审核状态。未提交的结果与完成时长为 `null`／空白，不能按零分处理。
+常用页面和导出通过永久 `record_id` 连接，新记录追加编号，删除后不复用。独立对话 JSON 按会话保存，CSV 按消息逐行；内部ID仅在受认证保护的归档中提供；来源与资格保留于常用JSON及归档，常用CSV不含这些列。分析纳入由当前版本、完整问卷及最终客观提交自动确定，不依赖人工审核状态。未提交的结果与完成时长为 `null`／空白，不能按零分处理。
 
 图表人数实际是会话记录数。系统不核验参与者身份或去重，同一人可重复开始；不能把记录数宣称为独立参与者人数。
 
@@ -96,9 +96,9 @@
 
 `pilot` 调用真实模型，但其 `is_demo` 可能仍标记材料／阶段，判断时应同时看 `run_mode`。合成展示使用 `SHOWCASE_MODE=1`、`demo` 和专用 `showcase.sqlite3`，初始化前检查数据库隔离；普通启动不填充样本。
 
-当前 V2 批次使用 `student-independent-simulation-v2` 生成器和 `student-authored-dialogue-v2` 对话模板，共 126 条完成记录，三个年龄区间各 42 条、S／A 各 63 条；ID 为 `SYNTH-STUDENT-V2-{age}-{001..042}`。仅前测答案和决策在独立分组前生成，不按目标均分调节。人工对话另预设 A 组分两轮分别询问本项目名额和每周到场次数，补齐后继续回答原问题并逐条提供 5 张线索；S 组由用户主动补充两事实后取得 3 张线索。两组分别为 8 轮和 5 轮，每个揭示事件均有对应资料正文及时间戳；A／S 总计 315／189 张线索是人工过程假设，不是模型实测效应。
+当前批次为 `student-126-20261022-v3`，生成器 `student-independent-simulation-v3`，对话模板 `student-authored-dialogue-v3`，过程种子 `student-dialogue-v3`。当前V3批次保留V2的126条前测答案、决策、人口属性、分组和模拟时点，三个年龄区间各42条、S／A各63条；只重编人工对话过程，个人结果不按组均值调整。A每条2–8次来源、S每条1–5次，范围重叠，不要求每条A都多于S；每卡最多2次且不连续，允许间隔复核，不同年龄区间使用不同资料兴趣权重。初始事实为无、仅既往名额、仅每周到场、两项均有四种，A只询问尚未提供的事实0–2次，S不主动问。每次揭示均对应实际模板正文和时间戳。当前固定seed结果总A308／S195次；A实际3–10轮、S2–8轮，均不超过12轮。A澄清0／1／2次分别14／18／31条，S63条均为0；A47／S25条含间隔复核。这些分布来自人工过程假设，未调用真实模型，不能作为干预效果证据。
 
-`manifest.evidence_policy_is_simulated_assumption=true`、`evidence_cards_per_record={S:3,A:5}`，实际模型调用为 0。真实前测耗时与 `synthetic_pretest_time_seconds` 均为空，模型实测延迟也为空；任务时点仍标记模拟。它们不是旧 600 条或 V1 数据的改名，不是招募样本，正式 `platform_analysis_eligible=0`。五项常用导出直接连接同一 V2 数据库；合成来源接口保留材料、清单和说明供核验，页面不重复列出下载目录。模拟分数、线索差、时点和过程提醒均不能支持真实参与者效应。
+source及归档记录 `parent_source_batch_id`、`parent_record_id`、`parent_profile_sha256`，可核对个人数据继承链；manifest保留 `evidence_policy_is_simulated_assumption=true` 并记录逐条来源、初始事实及追问规则，不再使用V2固定S3／A5线索数。前测耗时与 `synthetic_pretest_time_seconds` 均为空，模型实测延迟也为空；任务时点保留模拟标记。114条过程提醒仍从原逐题答案复算，不按组或低分制造提醒，不自动排除。它们不是招募样本，正式 `platform_analysis_eligible=0`；旧600条、跨年龄资料及V1不重标。五项常用导出读取同一V3数据库，三类CSV仅留业务列，JSON与归档保留来源和分析资格；页面不重复列来源下载目录。
 
 ## 逐题分析与组间比较
 

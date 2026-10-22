@@ -39,7 +39,8 @@ def test_catalogue_contains_only_new126_student_batch(client):
     assert len(datasets) == 1
     data = datasets[0]
     assert data["id"] == BATCH_ID and data["n_total"] == data["n_completed"] == 126
-    assert BATCH_ID == "student-126-20261022-v2"
+    assert BATCH_ID == "student-126-20261022-v3"
+    assert data["parent_source_batch_id"] == "student-126-20261022-v2"
     assert data["n_dropout"] == 0 and data["design_version"] == "university-v1"
     assert data["age_range"] == [18, 25] and data["education_stages"] == ["college", "bachelor"]
     assert "不是真实受试者" in data["notice"] and "不能作为" in data["calibration_note"]
@@ -78,7 +79,11 @@ def test_csv_json_zip_all_hold_the_same_single_batch():
         assert flat["synthetic_pretest_time_seconds"] == ""
         assert json.loads(flat["process_alert_details"]) == row["process_alert_details"]
         assert json.loads(flat["flags"]) == row["flags"]
-        assert row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V2-")
+        assert row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V3-")
+        assert flat["parent_record_id"] == row["parent_record_id"]
+        assert flat["parent_source_batch_id"] == row["parent_source_batch_id"] == "student-126-20261022-v2"
+        assert flat["parent_profile_sha256"] == row["parent_profile_sha256"]
+        assert json.loads(flat["fixture_dialogue_plan"]) == row["fixture_dialogue_plan"]
     with zipfile.ZipFile(io.BytesIO(payloads["zip"])) as archive:
         assert set(archive.namelist()) == {EXPORT_FILES[key][0] for key in payloads if key != "zip"}
         for key in payloads:
@@ -87,10 +92,14 @@ def test_csv_json_zip_all_hold_the_same_single_batch():
     assert json.loads(payloads["manifest_json"]) == get_student_dataset()["manifest"]
     assert "人工模拟假设" in payloads["readme"].decode()
     assert "不是真实模型" in payloads["readme"].decode()
+    assert "V3沿用V2大学生合成批次" in payloads["readme"].decode()
+    assert "原V2个人随机键" in payloads["readme"].decode()
+    assert "A组线索共308次，S组共195次" in payloads["readme"].decode()
 
 
-def test_a_legacy_external_directory_cannot_replace_the_current_v2_exports(tmp_path):
-    old = tmp_path / "student-126-20261022-v1"
+@pytest.mark.parametrize("old_batch", ["student-126-20261022-v1", "student-126-20261022-v2"])
+def test_an_older_external_directory_cannot_replace_the_current_v3_exports(tmp_path, old_batch):
+    old = tmp_path / old_batch
     old.mkdir()
     (old / EXPORT_FILES["json"][0]).write_text('[{"id":"old-v1-only"}]')
     app = FastAPI()
@@ -98,7 +107,7 @@ def test_a_legacy_external_directory_cannot_replace_the_current_v2_exports(tmp_p
     client = TestClient(app)
     rows = client.get("/api/admin/synthetic-export?file=json").json()
     assert len(rows) == 126
-    assert all(row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V2-") for row in rows)
+    assert all(row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V3-") for row in rows)
     assert "old-v1-only" not in json.dumps(rows)
 
 

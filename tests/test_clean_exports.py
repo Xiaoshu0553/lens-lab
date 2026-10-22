@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.clean_exports import DIALOGUE_COLUMNS, DISPLAY_VALUES, RECORD_COLUMNS, chinese_csv, process_alert_details, record_id_map
+from app.clean_exports import (DIALOGUE_CSV_COLUMNS, DISPLAY_VALUES, RECORD_COLUMNS, RECORD_CSV_COLUMNS,
+                               chinese_csv, process_alert_details, record_id_map)
 from app.db import connect
 from app.main import create_app
 from test_automatic_cohort import completed_fixture
@@ -99,7 +100,7 @@ def test_main_download_schema_is_fixed_ordered_and_excludes_internal_provenance(
     assert "SYN-" not in body and "2030" not in body and "preserve-me" not in body
     response = get(client, "/api/admin/export?kind=raw&format=csv")
     reader = csv.DictReader(io.StringIO(response.text.lstrip("\ufeff")))
-    assert reader.fieldnames == [label for _key, label in RECORD_COLUMNS]
+    assert reader.fieldnames == [label for _key, label in RECORD_CSV_COLUMNS]
     assert reader.fieldnames.count("记录编号") == 1
     assert "SYN-" not in response.text and "2030" not in response.text
     archive = {row["id"]: row for row in get(client, "/api/admin/archive-export?kind=raw&format=json").json()}
@@ -151,7 +152,7 @@ def test_dialogue_downloads_are_clean_and_retain_order_content_and_cross_table_i
         assert key not in record
     csv_response = get(client, "/api/admin/dialogue-export?format=csv")
     reader = csv.DictReader(io.StringIO(csv_response.text.lstrip("\ufeff")))
-    assert reader.fieldnames == [label for _key, label in DIALOGUE_COLUMNS]
+    assert reader.fieldnames == [label for _key, label in DIALOGUE_CSV_COLUMNS]
     rows = list(reader)
     assert next(row for row in rows if row["记录编号"] == alias and row["发言者"] == "参与者")["对话内容"] == record["messages"][0]["content"]
     assert {row["记录编号"] for row in rows} == {row["record_id"] for row in response.json()}
@@ -261,8 +262,8 @@ def test_empty_standard_downloads_keep_the_same_chinese_headers(tmp_path):
     assert get(client, "/api/admin/export?format=json").json() == []
     main = get(client, "/api/admin/export?format=csv")
     dialogue = get(client, "/api/admin/dialogue-export?format=csv")
-    assert next(csv.reader(io.StringIO(main.text.lstrip("\ufeff")))) == [label for _key, label in RECORD_COLUMNS]
-    assert next(csv.reader(io.StringIO(dialogue.text.lstrip("\ufeff")))) == [label for _key, label in DIALOGUE_COLUMNS]
+    assert next(csv.reader(io.StringIO(main.text.lstrip("\ufeff")))) == [label for _key, label in RECORD_CSV_COLUMNS]
+    assert next(csv.reader(io.StringIO(dialogue.text.lstrip("\ufeff")))) == [label for _key, label in DIALOGUE_CSV_COLUMNS]
 
 
 @pytest.mark.parametrize("has_empty_details_column", [False, True])

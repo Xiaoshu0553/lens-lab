@@ -231,7 +231,7 @@ def build():
         if not line:i+=1;continue
         if line.startswith('# '):
             idx+=1;p=doc.add_paragraph(line[2:],style='Heading 1');bookmark(p,f'chapter_{idx}',idx)
-            if line.startswith('# 附录三'):p.paragraph_format.page_break_before=True
+            if line.startswith(('# 附录二', '# 附录三')):p.paragraph_format.page_break_before=True
         elif line.startswith('## '):doc.add_paragraph(line[3:],style='Heading 2')
         elif line.startswith('[[FIGURE:'):
             key=line[len('[[FIGURE:'):-2]

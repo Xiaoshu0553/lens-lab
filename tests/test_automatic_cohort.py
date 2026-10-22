@@ -6,7 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.clean_exports import DIALOGUE_COLUMNS
+from app.clean_exports import DIALOGUE_CSV_COLUMNS
 from app.db import connect
 from app.main import create_app
 from test_flow import auth, decision_payload, settings, start_payload
@@ -156,7 +156,7 @@ def test_dialogue_exports_preserve_sequence_content_source_and_empty_conversatio
     assert archived[with_messages]["run_mode"] == "demo" and archived[with_messages]["is_demo"] == 1
     csv_response = client.get("/api/admin/dialogue-export?format=csv", headers=auth())
     csv_rows = list(csv.DictReader(io.StringIO(csv_response.text.lstrip("\ufeff"))))
-    headers = dict(DIALOGUE_COLUMNS)
+    headers = dict(DIALOGUE_CSV_COLUMNS)
     assert len(csv_rows) == 3 and {row[headers["record_id"]] for row in csv_rows} == set(records)
     user_row = next(row for row in csv_rows if row[headers["role"]] == "参与者")
     assert user_row[headers["content"]] == "'" + question
@@ -187,4 +187,4 @@ def test_dialogue_export_rejects_unknown_formats_and_empty_download_keeps_header
     response = client.get("/api/admin/dialogue-export?format=csv", headers=auth())
     assert response.status_code == 200
     headers = next(csv.reader(io.StringIO(response.text.lstrip("\ufeff"))))
-    assert headers == [label for _key, label in DIALOGUE_COLUMNS]
+    assert headers == [label for _key, label in DIALOGUE_CSV_COLUMNS]
