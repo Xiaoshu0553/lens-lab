@@ -26,7 +26,7 @@ def main() -> None:
         "GROUP_CAP=0\n"
         "LITERACY_BAND_WIDTH=10\n"
         "MODEL_BASE_URL=https://api.deepseek.com\n"
-        "MODEL_API_KEY=\n"
+        "MODEL_API_KEY=自行填写API\n"
         "MODEL_NAME=deepseek-flash\n"
         "MODEL_TEMPERATURE=0\n"
         "MODEL_THINKING=disabled\n"

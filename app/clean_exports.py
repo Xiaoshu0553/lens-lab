@@ -17,6 +17,7 @@ QUESTION_IDS = tuple(item["id"] for item in ITEMS)
 RECORD_COLUMNS = (
     ("record_id", "记录编号"),
     ("record_kind", "记录类型"), ("is_synthetic", "合成数据(1是/0否)"),
+    ("source_batch_id", "数据批次"),
     ("data_origin", "数据来源"), ("timestamp_is_simulated", "模拟时间(1是/0否)"),
     ("platform_analysis_eligible", "可纳入正式参与者分析(1是/0否)"),
     ("showcase_analysis_eligible", "可用于模拟展示统计(1是/0否)"),
@@ -43,7 +44,7 @@ RECORD_COLUMNS = (
     ("ended_at_beijing", "提交时间(北京时间)"),
 )
 DIALOGUE_METADATA_KEYS = (
-    "record_kind", "is_synthetic", "data_origin", "timestamp_is_simulated", "platform_analysis_eligible",
+    "record_kind", "is_synthetic", "source_batch_id", "data_origin", "timestamp_is_simulated", "platform_analysis_eligible",
     "showcase_analysis_eligible", "analysis_eligible",
     "record_id", "age_band", "education_stage", "student_confirmed", "group_id", "interaction_condition", "clarification_strategy",
     "task_title", "scenario_id", "literacy_score", "literacy_percent", "literacy_band",

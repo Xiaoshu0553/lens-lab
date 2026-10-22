@@ -105,7 +105,7 @@ function renderShowcaseNotice() {
   const completed = showcaseTotals?.submitted;
   const unsubmitted = showcaseTotals?.unsubmitted;
   const box = $("admin-mode");
-  const title = typeof count === "number" ? `大学生合成展示 · 共 ${count} 条记录` : "记录概况";
+  const title = typeof count === "number" ? `大学生记录 · 共 ${count} 条` : "记录概况";
   box.replaceChildren(node("strong", title));
   if (typeof completed === "number" && typeof unsubmitted === "number") {
     box.append(node("span", `已完成 ${completed} 条 · 未完成 ${unsubmitted} 条`, "showcase-counts"));
@@ -115,15 +115,13 @@ function renderShowcaseNotice() {
 function configureAdminEnvironment(info) {
   showcaseMode = info.showcase_mode === true;
   showcaseTotals = info.showcase_totals || null;
-  const downloads = $("synthetic-download-section");
-  if (downloads) downloads.hidden = false;
   const comparison = $("showcase-comparison");
   if (comparison) comparison.hidden = !showcaseMode;
   if (!showcaseMode) return;
   renderShowcaseNotice();
   const replacements = {
-    "admin-analysis-note": "当前为 university-v1 大学生方案；合成展示记录仅用于功能核验，不是实证结果。",
-    "data-export-title": "导出大学生合成展示记录",
+    "admin-analysis-note": "任务按预设选项自动计分，当前方案的完成记录自动纳入统计。",
+    "data-export-title": "导出记录",
     "data-export-description": "记录 CSV/JSON 保留全部记录，包括未完成记录和历史版本。常用列包含记录编号、年龄、分组、信息素养与任务评分、用时及 AI 主动提示、澄清和引导次数。已完成记录 CSV 仅包含当前方案中完成整份信息素养测试并已提交任务的记录，用于统计；当前同一批记录全部完成时，两类导出的人数可以相同。完整对话单独下载，各下载使用同一记录编号。导出范围覆盖全部年龄，不受上方筛选影响。",
     "analysis-export-link": "已完成记录 CSV"
   };
@@ -301,10 +299,10 @@ async function loadSummary() {
     if (data.showcase_totals) showcaseTotals = data.showcase_totals;
     renderShowcaseNotice();
   } else $("admin-mode").textContent = data.study_mode === "demo"
-    ? "当前为 DEMO 模拟回答模式。所有新任务和会话均为演示数据。"
+    ? "任务测试。任务按预设选项自动计分。"
     : data.study_mode === "pilot"
-      ? `当前为 PILOT 任务测试模式，澄清策略：${data.clarification_strategy === "prompt" ? "提示词" : "判断模块"}。任务按预设选项自动计分。`
-      : `当前为 LIVE 正式模式，澄清策略：${data.clarification_strategy === "prompt" ? "提示词" : "判断模块"}。任务按预设选项自动计分。`;
+      ? "研究者试跑。任务按预设选项自动计分。"
+      : "实验任务。任务按预设选项自动计分。";
   const box = $("summary"); box.replaceChildren();
   box.append(node("p", data.active_task_title ? `当前任务：${data.active_task_title}` : "当前没有启用任务。", "wide muted"));
   for (const group of ["S", "A"]) {
@@ -439,18 +437,17 @@ function renderReviews() {
     const recordNumber = typeof row.record_id === "string" && /^R\d{4,}$/.test(row.record_id)
       ? row.record_id : `R${String(reviewPage * REVIEW_PAGE_SIZE + index + 1).padStart(4, "0")}`;
     const title = node("h3", `记录 ${recordNumber} · ${row.ended_at ? "已完成" : "未完成"}`);
-    const mode = { demo: "DEMO", pilot: "PILOT", live: "LIVE" }[row.run_mode] || (row.is_demo ? "DEMO" : "LIVE");
+    const mode = { demo: "任务测试", pilot: "研究者试跑", live: "实验任务" }[row.run_mode] || (row.is_demo ? "任务测试" : "实验任务");
     card.append(title, node("p", `年龄区间 ${row.age_band || "旧版"} · 任务 ${row.task_id}${showcaseMode ? "" : ` · ${mode}`} · 提交 ${beijingTimeText(row.ended_at)}（北京时间）`, "muted"));
     const isShowcaseRecord = showcaseMode && typeof row.showcase_analysis_eligible === "boolean";
     const analysisEligible = isShowcaseRecord ? row.showcase_analysis_eligible
       : row.analysis_eligible ?? row.in_current_cohort;
-    const cohortLabel = isShowcaseRecord
-      ? (analysisEligible ? "展示统计可用 · 合成记录不纳入真实研究分析" : "不计入当前展示统计")
-      : analysisEligible === true ? "当前统计范围"
-        : analysisEligible === false ? "不计入当前统计" : "统计范围未标注";
+    const cohortLabel = analysisEligible === true ? "可纳入当前统计"
+      : analysisEligible === false ? "不计入当前统计" : "统计范围未标注";
     const reasons = isShowcaseRecord ? row.showcase_analysis_exclusion_reasons
       : row.analysis_exclusion_reasons ?? row.cohort_exclusion_reasons;
-    const cohortReasons = Array.isArray(reasons) ? reasons.filter((reason) => typeof reason === "string" && reason) : [];
+    const cohortReasons = Array.isArray(reasons) ? reasons.filter((reason) => typeof reason === "string" && reason)
+      .map(reason => /合成|模拟/.test(reason) ? "记录来源不属于当前统计范围" : reason) : [];
     card.append(node("p", cohortLabel + (cohortReasons.length ? `：${cohortReasons.join("；")}` : ""), "muted"));
     const prompts = aiPromptCounts(row);
     card.append(node("p", `AI主动提示：${prompts.total}次（澄清${prompts.clarification}次、引导${prompts.guidance}次）`));

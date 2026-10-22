@@ -16,7 +16,7 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import Response
 
-from .student_showcase import BATCH_ID, NOTICE, RECORD_COUNT, get_student_dataset
+from .student_showcase import BATCH_ID, EVIDENCE_POLICY, NOTICE, RECORD_COUNT, get_student_dataset
 
 
 EXPORT_FILES = {
@@ -30,7 +30,7 @@ EXPORT_FILES = {
 EXPECTED_COUNTS = {"total": RECORD_COUNT, "completed": RECORD_COUNT, "dropout": 0}
 CALIBRATION_NOTE = (
     "本批次未使用旧600人或旧126人作答，不按目标均值校准，不预设澄清组得分更高。"
-    "模拟分差只由固定生成规则产生，不能作为干预效果或研究发现。"
+    "模拟分差只由固定生成规则产生，不能作为干预效果或研究发现。" + EVIDENCE_POLICY
 )
 
 
@@ -54,13 +54,22 @@ def _readme(dataset: dict) -> str:
 先用固定seed从新版30题材料生成答案，并抽样最终参加和办理选项，再独立分配实验组。
 同一生成规则用于两组，答题概率与决策抽样概率不读取实验组。
 没有按均分、组差或显著性选样，没有重试seed。
-两组首轮对话的差别仅是人工编写的提示策略展示，不是模型遵从率的实测结果。
+两组对话与来源展示均为人工编写的过程示例，不是模型遵从率的实测结果。
+
+V2过程生成假设：{manifest['evidence_policy']}
+A组每轮只问一个事实，两个事实补齐后继续作答；S组可以主动提供这两项事实。
+AI资料线索次数按实际模板回复中的明确来源卡片与对应evidence_reveal事件复算，
+不是按组别直接填入汇总。各年龄区间A组每条目标来源出现21次，S组轮转3条来源，
+各来源出现次数均少于21；这些差异是人工设定的过程假设，不是观察到的干预效果。
+答案与最终决策的抽样不读取组别，也不因这项过程假设重新调分。
 
 全部记录的is_synthetic=1、record_kind=synthetic、data_origin=synthetic、
 platform_analysis_eligible=0。所有日期与作答/对话/决策时长都是模拟值。
 actual_model_latency_ms、mean_reply_seconds均为null；没有reply_latency事件。
-synthetic_pretest_time_seconds仅为模拟前测时长，不能当成实际埋点测量。
+synthetic_pretest_time_seconds为null；未记录前测起点，不补造前测时长。
 CSV中的JSON对象和数组以JSON文本存储，空白模型延迟单元格表示缺失，不是0秒。
+过程提醒按同一derive_process_alerts规则从逐题答案、时点及对话复算，
+每条保留触发规则、观测值、来源字段和模拟标记，不因分组或低分直接添加提醒。
 
 问卷版本：{manifest['form_version']}
 研究设计：{manifest['design_version']}
@@ -143,7 +152,7 @@ def register_student_synthetic_exports(app: FastAPI, require_admin: Callable,
         manifest = get_student_dataset()["manifest"]
         return {"datasets": [{
             "id": BATCH_ID, "source_batch_id": BATCH_ID, "design_version": manifest["design_version"],
-            "label": "126条大学生合成数据（独立新版）", "is_synthetic": True,
+            "label": "126条大学生合成数据（V2过程假设）", "is_synthetic": True,
             "data_origin": "synthetic", "record_kind": "synthetic",
             "platform_database_imported": None, "platform_database_inspected": False,
             "available": True, "verification_status": "deterministic_student_batch_frozen_materials",
@@ -152,6 +161,7 @@ def register_student_synthetic_exports(app: FastAPI, require_admin: Callable,
             "age_range": [18, 25], "age_bands": list(manifest["age_counts"]),
             "education_stages": ["college", "bachelor"], "student_confirmed": True,
             "notice": NOTICE, "calibration_note": CALIBRATION_NOTE,
+            "evidence_policy": EVIDENCE_POLICY, "evidence_policy_is_simulated_assumption": True,
             "files": [{"key": key, "label": label, "filename": filename,
                        "available": True, "url": f"/api/admin/synthetic-export?file={key}"}
                       for key, (filename, label, _media) in EXPORT_FILES.items()],

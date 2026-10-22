@@ -22,7 +22,6 @@ services:
       CLARIFICATION_STRATEGY: prompt
     volumes:
       - ./university-showcase-data:/app/university-showcase-data
-      - ./synthetic-datasets:/app/synthetic-datasets:ro
     ports:
       - "127.0.0.1:8001:8000"
     restart: unless-stopped

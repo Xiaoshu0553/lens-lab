@@ -116,7 +116,7 @@ test('record analysis membership uses the automatic selector rather than the old
   assert.match(content(h.list()), /不计入当前统计：历史任务版本/);
 });
 
-test('synthetic showcase eligibility remains separate from real-study analysis eligibility', async () => {
+test('current statistics membership uses neutral labels while retaining source eligibility', async () => {
   const rows = [record({analysis_eligible:false,showcase_analysis_eligible:true,
     analysis_exclusion_reasons:['合成记录不纳入真实研究分析']}),
     record({id:'historical-synthetic',analysis_eligible:false,showcase_analysis_eligible:false,
@@ -125,16 +125,20 @@ test('synthetic showcase eligibility remains separate from real-study analysis e
   h.run('configureAdminEnvironment({showcase_mode:true})');
   await h.run('loadReviews()');
   const cards = h.list().querySelectorAll('article');
-  const current = cards.find(card => content(card).includes('展示统计可用'));
+  const current = cards.find(card => content(card).includes('可纳入当前统计'));
   assert.ok(current);
-  assert.match(content(current), /展示统计可用 · 合成记录不纳入真实研究分析/);
+  assert.match(content(current), /可纳入当前统计/);
+  assert.doesNotMatch(content(current), /合成|模拟|演示|真实研究/);
+  assert.equal(rows[0].analysis_eligible, false);
+  assert.equal(rows[0].showcase_analysis_eligible, true);
+  assert.deepEqual(rows[0].analysis_exclusion_reasons, ['合成记录不纳入真实研究分析']);
   assert.doesNotMatch(content(current), /不计入当前统计|无效/);
-  assert.ok(cards.some(card => /不计入当前展示统计：历史材料版本/.test(content(card))));
+  assert.ok(cards.some(card => /不计入当前统计：历史材料版本/.test(content(card))));
 
   const realStudy = adminHarness([rows[0]]);
   await realStudy.run('loadReviews()');
-  assert.match(content(realStudy.list()), /不计入当前统计：合成记录不纳入真实研究分析/);
-  assert.doesNotMatch(content(realStudy.list()), /展示统计可用/);
+  assert.match(content(realStudy.list()), /不计入当前统计：记录来源不属于当前统计范围/);
+  assert.doesNotMatch(content(realStudy.list()), /可纳入当前统计|合成|模拟|演示/);
 });
 
 test('pretest QC flags have readable Chinese labels without changing record eligibility', async () => {
@@ -146,7 +150,7 @@ test('pretest QC flags have readable Chinese labels without changing record elig
   assert.match(text, /连续选择同一位置较多/);
   assert.match(text, /过程提醒.*信息素养测试用时偏短.*连续选择同一位置较多/);
   assert.match(text, /AI主动提示：0次（澄清0次、引导0次）/);
-  assert.match(text, /当前统计范围/);
+  assert.match(text, /可纳入当前统计/);
   assert.doesNotMatch(text, /pretest_fast_completion|pretest_long_identical_run|不计入当前统计/);
 });
 
@@ -158,7 +162,7 @@ test('process alerts show the stored answer-vector evidence separately from AI p
   const text = content(h.list());
   assert.match(text, /连续同一位置30题（阈值12题）/);
   assert.match(text, /AI主动提示：3次（澄清2次、引导1次）/);
-  assert.match(text, /当前统计范围/);
+  assert.match(text, /可纳入当前统计/);
   assert.equal(h.list().querySelectorAll('div').filter(element => element.className === 'flag-line').length,1);
   assert.doesNotMatch(text, /literacy_answers_json|quality_version|observed-v1|不计入当前统计|无效/);
 });
@@ -244,10 +248,10 @@ test('historical records remain in the queue with their current-statistics exclu
     in_current_cohort: false, cohort_exclusion_reasons: ['运行模式不同', '问卷版本不同']})]);
   await h.run('loadReviews()');
   assert.equal(h.list().children.length, 2);
-  const current = h.list().children.find(card => content(card).includes('当前统计范围'));
-  assert.match(content(current), /当前统计范围/);
-  assert.match(content(current), /PILOT/);
-  assert.doesNotMatch(content(current), /DEMO/);
+  const current = h.list().children.find(card => content(card).includes('可纳入当前统计'));
+  assert.match(content(current), /可纳入当前统计/);
+  assert.match(content(current), /研究者试跑/);
+  assert.doesNotMatch(content(current), /任务测试/);
   const historical = content(h.list().children.find(card => content(card).includes('运行模式不同')));
   assert.match(historical, /不计入当前统计/);
   assert.match(historical, /运行模式不同.*问卷版本不同/);
@@ -374,12 +378,14 @@ test('canonical record_id from the backend stays identical in the title and deta
   assert.equal(rows[0].record_id, 'R0093');
 });
 
-test('university showcase labels its synthetic record counts and retains ordinary export buttons', () => {
+test('university overview uses neutral record counts and retains the five export buttons', () => {
   const h = adminHarness([]);
   h.run('configureAdminEnvironment({showcase_mode:true,showcase_totals:{sessions:126,submitted:126,unsubmitted:0}})');
-  assert.match(content(h.document.getElementById('admin-mode')), /大学生合成展示.*126 条记录.*已完成 126 条.*未完成 0 条/);
-  assert.match(content(h.document.getElementById('admin-mode')), /大学生合成展示/);
-  assert.equal(h.document.getElementById('synthetic-download-section').hidden, false);
+  assert.match(content(h.document.getElementById('admin-mode')), /大学生记录.*共 126 条.*已完成 126 条.*未完成 0 条/);
+  assert.doesNotMatch(content(h.document.getElementById('admin-mode')), /合成|模拟|演示|真实/);
+  assert.equal(h.document.getElementById('data-export-title').textContent, '导出记录');
+  assert.doesNotMatch(h.document.getElementById('admin-analysis-note').textContent, /合成|模拟|演示|真实/);
+  assert.equal(h.document.getElementById('synthetic-download-section'), null);
   assert.equal(h.document.getElementById('analysis-export-link').textContent, '已完成记录 CSV');
   const ordinary = h.document.getElementById('data-export').querySelectorAll('a')
     .filter(link => (link.attributes.get('href') || '').startsWith('/api/admin/export?'));
@@ -391,31 +397,29 @@ test('university showcase labels its synthetic record counts and retains ordinar
   assert.match(h.document.getElementById('data-export-description').textContent, /完整对话单独下载，各下载使用同一记录编号/);
 });
 
-test('university showcase downloads only the current 126 batch and omits historical 600 data', async () => {
+test('export panel has one current record and dialogue download entry point without the retired catalogue', async () => {
   const document = makeDocument();
   const requested = [];
-  const datasets = [
-    {design_version:'literacy-age-v5',available:true,n_total:600,n_completed:587,n_dropout:13,
-      files:[{key:'calibrated_csv',label:'历史600数据',available:true}]},
-    {design_version:'university-v1',available:true,n_total:126,n_completed:126,n_dropout:0,
-      notice:'大学生虚构记录，不是实证结果。',files:[{key:'csv',label:'当前大学生CSV',available:true},
-      {key:'materials_json',label:'共同问卷与任务',available:true}]},
-  ];
   const context = vm.createContext({document, console, fetch: async url => {
     requested.push(url);
-    return response(url === '/api/info' ? {showcase_mode:true} : {datasets});
+    return response({});
   }});
+  // A cached old catalogue script must also be harmless after its panel is removed.
   const source = fs.readFileSync(path.join(__dirname, '../static/admin-synthetic.js'), 'utf8');
   vm.runInContext(source, context);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(document.getElementById('synthetic-download-section').hidden, false);
-  const catalogue = document.getElementById('synthetic-datasets');
-  assert.match(content(catalogue), /126条大学生合成记录/);
-  assert.doesNotMatch(content(catalogue), /600|历史600数据/);
-  const links = catalogue.querySelectorAll('a');
-  assert.deepEqual(links.map(link => link.href), ['/api/admin/synthetic-export?file=csv', '/api/admin/synthetic-export?file=materials_json']);
-  await document.getElementById('refresh-button').emit('click');
-  assert.deepEqual(requested, ['/api/info','/api/admin/synthetic-datasets','/api/admin/synthetic-datasets']);
+  assert.deepEqual(requested, []);
+  assert.equal(document.getElementById('synthetic-download-section'), null);
+  assert.equal(document.getElementById('synthetic-datasets'), null);
+  const html = fs.readFileSync(path.join(__dirname, '../static/admin.html'), 'utf8');
+  assert.doesNotMatch(html, /admin-synthetic\.js|synthetic-download-section|synthetic-datasets|当前大学生合成展示（126条）/);
+  const links = document.getElementById('data-export').querySelectorAll('a')
+    .map(link => link.attributes.get('href'));
+  assert.deepEqual(links, [
+    '/api/admin/export?kind=raw&format=csv', '/api/admin/export?kind=raw&format=json',
+    '/api/admin/export?kind=analysis&format=csv',
+    '/api/admin/dialogue-export?format=csv', '/api/admin/dialogue-export?format=json',
+  ]);
 });
 
 test('showcase comparison renders the three supplied groups and updates from new data', () => {
@@ -465,7 +469,7 @@ test('showcase review rows omit repeated mode labels while normal rows retain th
   assert.doesNotMatch(content(h.list()), /DEMO|PILOT|LIVE/);
   h.run('configureAdminEnvironment({showcase_mode:false})');
   await h.run('loadReviews()');
-  assert.match(content(h.list()), /DEMO/);
+  assert.match(content(h.list()), /任务测试/);
 });
 
 test('summary uses automatically included completed counts and never asks for review', async () => {
@@ -498,4 +502,19 @@ test('dialogue exports use separate authenticated API links for the completed an
   assert.match(html, /记录与对话查看/);
   assert.doesNotMatch(html, /人工审核|待审核|审核有效|问卷预测试|预测试作答/);
   assert.doesNotMatch(shippedScript, /\/sessions\/\$\{row\.id\}\/(?:review|score)/);
+});
+
+
+test('finished administrator copy stays neutral and keeps one export entry for each format', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../static/admin.html'), 'utf8');
+  assert.doesNotMatch(html, /合成|模拟|演示|真实模型|synthetic-download-section|admin-synthetic\.js/);
+  const h = adminHarness([]);
+  h.run('configureAdminEnvironment({showcase_mode:true,showcase_totals:{sessions:126,submitted:126,unsubmitted:0}})');
+  for (const id of ['admin-mode', 'admin-analysis-note', 'data-export-title', 'data-export-description']) {
+    assert.doesNotMatch(content(h.document.getElementById(id)), /合成|模拟|演示|真实研究结果/);
+  }
+  const links = h.document.getElementById('data-export').querySelectorAll('a')
+    .map(link => link.attributes.get('href'));
+  assert.equal(links.length, 5);
+  assert.equal(new Set(links).size, 5);
 });

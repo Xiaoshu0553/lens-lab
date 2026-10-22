@@ -35,6 +35,7 @@ from .student_review import inventory, render_review_html
 from .outcomes import compare_conditions
 from .record_reporting import (ai_prompt_counts, ai_prompt_totals, automatic_analysis_reasons,
                                cohort_exclusion_reasons, record_times)
+from .process_alerts import derive_process_alerts
 from .model import (ANSWER_PROMPT_VERSION, CLARIFICATION_MARKER,
                     PROMPT_ONLY_VERSION, DemoProvider, LiveProvider, ModelError,
                     answer_system_prompt, prompt_only_system_prompt)
@@ -305,6 +306,13 @@ def _messages(db, session_id: str) -> list[dict]:
     return [dict(row) for row in db.execute(
         "SELECT role,content,action,created_at FROM messages WHERE session_id=? ORDER BY id", (session_id,)
     )]
+
+
+def _record_process_alerts(record, messages):
+    preserved = process_alert_details(dict(record))
+    seen = {detail.get("code") for detail in preserved if isinstance(detail, dict)}
+    return preserved + [detail for detail in derive_process_alerts(dict(record), messages)
+                        if detail["code"] not in seen]
 
 
 def _add_event(db, session_id: str, kind: str, detail: dict) -> None:
@@ -1201,7 +1209,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                           "literacy_instrument_version", "model_config_id")
                 record = {key: row[key] for key in fields}
                 record["id"] = record["record_id"] = aliases[row["id"]]
-                record["process_alert_details"] = process_alert_details(dict(row))
+                messages = _messages(db, row["id"])
+                record["process_alert_details"] = _record_process_alerts(row, messages)
                 task = json.loads(row["task_snapshot_json"])
                 reasons = analysis_reasons(row, active)
                 record.update(record_times(row))
@@ -1213,7 +1222,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                "completion_status": "submitted", "group_id": row["group_id"],
                                "literacy_score": row["literacy_score"], "literacy_band": row["literacy_band"],
                                "prompt_version": row["prompt_version"], "prompt_version_blinded": False})
-                record.update({"flags": json.loads(row["flags_json"]), "messages": _messages(db, row["id"]),
+                record.update({"flags": json.loads(row["flags_json"]), "messages": messages,
                                "rubric": task["rubric"], "reference_text": task["reference_text"],
                                "machine_scored": bool(task.get("decision_options"))})
                 record.update(ai_prompt_counts(record["messages"]))
@@ -1275,7 +1284,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for row in rows:
             record = dict(row)
             record["record_id"] = aliases[row["id"]]
-            record["process_alert_details"] = process_alert_details(record)
+            messages = _messages(db, row["id"])
+            record["process_alert_details"] = _record_process_alerts(row, messages)
             if settings.showcase_mode:
                 record["showcase_mode"] = True
             snapshot = json.loads(row["task_snapshot_json"])
@@ -1307,7 +1317,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record["timestamp_is_simulated"] = bool(record.get("timestamp_is_simulated"))
             record["data_origin"] = "synthetic" if synthetic else record.get("data_origin") or row["record_kind"]
             record["analysis_exclusion_reasons_json"] = json.dumps(eligibility_reasons, ensure_ascii=False)
-            messages = _messages(db, row["id"])
             record.update(ai_prompt_counts(messages))
             record["messages_json"] = json.dumps(messages, ensure_ascii=False)
             record["message_requests_json"] = json.dumps([dict(request) for request in db.execute(

@@ -351,7 +351,7 @@ test("model preview restores only its own service namespace and prefixes every A
     "/preview-api/api/info?researcher_preview=true", "/preview-api/api/session/real-model-trial",
   ]);
   assert.equal(h.run("sessionId"), "real-model-trial");
-  assert.equal(h.el("mode-banner").textContent, "研究者试跑 · 真实模型。");
+  assert.equal(h.el("mode-banner").textContent, "研究者试跑。");
   assert.deepEqual(h.value("[STORAGE_KEY, DRAFT_KEY, HISTORY_KEY, PENDING_MESSAGE_KEY, PENDING_START_KEY]"), [
     "lens_university_v1_preview_session_id", "lens_university_v1_preview_pretest_draft_v1", "lens_university_v1_preview_session_history",
     "lens_university_v1_preview_pending_message", "lens_university_v1_preview_pending_start",
@@ -392,12 +392,12 @@ test("preview rejects unsafe prefixes instead of sending requests to an external
   }
 });
 
-test("preview with no separate service keeps legacy keys and labels offline rules accurately", async () => {
+test("preview with no separate service keeps legacy keys and uses the same trial label", async () => {
   const h = harness({bodyDataset: {researcherPreview: "true"}, fetch: () => response({...info, study_mode: "demo"})});
   await h.run("init()");
   assert.equal(h.requests[0].url, "/api/info?researcher_preview=true");
   assert.equal(h.run("STORAGE_KEY"), "lens_university_v1_preview_session_id");
-  assert.equal(h.el("mode-banner").textContent, "研究者试跑 · 规则演示。");
+  assert.equal(h.el("mode-banner").textContent, "研究者试跑。");
 });
 
 function keyboardChat({ pendingMessage } = {}) {
@@ -559,4 +559,14 @@ test("university-v1 starts fresh without reading or deleting historical cross-ag
   assert.equal(local.getItem("lens_session_id"), "historical-session");
   assert.equal(local.getItem("lens_session_history"), '[{"id":"historical-session"}]');
   assert.equal(drafts.getItem("lens_pretest_draft_v1"), '{"version":"historical-form"}');
+});
+
+
+test("researcher trial banner remains neutral for every service mode", async () => {
+  for (const study_mode of ["demo", "pilot", "live"]) {
+    const h = harness({bodyDataset: {researcherPreview: "true"}, fetch: () => response({...info, study_mode})});
+    await h.run("init()");
+    assert.equal(h.el("mode-banner").textContent, "研究者试跑。");
+    assert.doesNotMatch(h.el("mode-banner").textContent, /合成|模拟|演示|真实/);
+  }
 });

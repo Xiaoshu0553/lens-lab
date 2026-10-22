@@ -80,11 +80,13 @@ class Settings:
         password = os.getenv("ADMIN_PASSWORD", "")
         if not password:
             raise ValueError("请先运行 python scripts/setup.py，生成管理员密码")
-        key = os.getenv("MODEL_API_KEY", "")
+        key = os.getenv("MODEL_API_KEY", "").strip()
+        if key in {"自行填写API", "请自行填写API", "YOUR_API_KEY"}:
+            key = ""
         base_url = os.getenv("MODEL_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         local_provider = urlparse(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
         if mode in {"pilot", "live"} and not key and not local_provider:
-            raise ValueError("远程模型服务必须配置 MODEL_API_KEY；本地 Ollama 可以留空")
+            raise ValueError("请自行填写API：远程模型服务必须配置 MODEL_API_KEY；本地 Ollama 可以留空")
         db = Path(os.getenv("DATABASE_PATH", str(ROOT / "university-data" / "lens.sqlite3")))
         if not db.is_absolute():
             db = ROOT / db

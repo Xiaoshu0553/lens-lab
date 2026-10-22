@@ -8,7 +8,6 @@ services:
       DATABASE_PATH: /app/data/lens.sqlite3
     volumes:
       - ./university-data:/app/data
-      - ./synthetic-datasets:/app/synthetic-datasets:ro
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped

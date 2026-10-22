@@ -11,6 +11,7 @@ from app.config import ROOT, Settings
 from app.db import connect, init_db
 from app.student_materials import AGE_BANDS, FORM_VERSION, score_form
 from app.student_seed import seed_student_materials
+from app.process_alerts import derive_process_alerts
 
 
 def student_settings(tmp_path):
@@ -62,6 +63,84 @@ def test_mutating_return_value_does_not_change_frozen_batch():
     assert showcase.get_student_dataset() == expected
 
 
+def test_v2_source_policy_is_explicit_and_timestamps_are_not_future_pretest_observations():
+    data = showcase.get_student_dataset()
+    assert showcase.BATCH_ID == "student-126-20261022-v2"
+    manifest = data["manifest"]
+    assert manifest["evidence_policy_is_simulated_assumption"] is True
+    assert manifest["evidence_cards_per_record"] == {"S": 3, "A": 5}
+    assert "人工模拟假设" in manifest["evidence_policy"] and "不是真实模型" in manifest["evidence_policy"]
+    assert manifest["no_group_score_effect"] is True and manifest["pretest_duration_recorded"] is False
+    from datetime import datetime, timezone
+    for row in data["records"]:
+        assert row["id"].startswith("SYNTH-STUDENT-V2-")
+        assert row["source_batch_id"] == showcase.BATCH_ID
+        assert row["fixture_render_version"] == "student-authored-dialogue-v2"
+        assert row["synthetic_pretest_time_seconds"] is None
+        assert datetime.fromisoformat(row["ended_at"]) < datetime(2026, 10, 22, 7, tzinfo=timezone.utc)
+
+
+def test_more_adaptive_clues_are_actual_card_replies_in_every_age_band():
+    data = showcase.get_student_dataset()
+    totals = Counter()
+    for row in data["records"]:
+        cards = {card["id"]: card for card in
+                 data["frozen_materials"][row["age_band"]]["tasks"][row["scenario_id"]]["evidence_cards"]}
+        reveals = [event for event in row["model_events"] if event["event_type"] == "evidence_reveal"]
+        replies = [message for message in row["messages"] if message["role"] == "assistant" and message["action"] == "evidence"]
+        assert row["evidence_reveals"] == len(reveals) == len(replies) == (5 if row["group_id"] == "A" else 3)
+        assert len({event["detail"]["card_id"] for event in reveals}) == len(reveals)
+        for event in reveals:
+            card_id = event["detail"]["card_id"]
+            matching = [reply for reply in replies if reply["created_at"] == event["created_at"]]
+            assert len(matching) == 1
+            assert f"资料 {card_id}｜" in matching[0]["content"]
+            assert cards[card_id]["body"] in matching[0]["content"]
+            totals[(row["age_band"], row["group_id"], card_id)] += 1
+    for age in AGE_BANDS:
+        for card_id in showcase.EVIDENCE_CARD_IDS:
+            assert totals[(age, "A", card_id)] == 21 > totals[(age, "S", card_id)] > 0
+    assert sum(value for (_age, group, _card), value in totals.items() if group == "A") == 315
+    assert sum(value for (_age, group, _card), value in totals.items() if group == "S") == 189
+
+
+def test_adaptive_fixture_clarifies_one_fact_per_turn_and_resumes_original_request():
+    for row in showcase.get_student_dataset()["records"]:
+        messages = row["messages"]
+        clarifications = [message for message in messages if message["action"] == "prompt_clarification"]
+        if row["group_id"] == "S":
+            assert not clarifications
+            continue
+        assert len(clarifications) == row["ai_clarification_count"] == 2
+        assert messages[1] == clarifications[0] and messages[3] == clarifications[1]
+        assert "名额" in messages[1]["content"] and "每周" not in messages[1]["content"]
+        assert "每周" in messages[3]["content"] and "名额" not in messages[3]["content"]
+        assert messages[2]["role"] == messages[4]["role"] == "user"
+        assert "名额" in messages[2]["content"] and "每周" in messages[4]["content"]
+        assert "继续" in messages[5]["content"] and "原问题" in messages[5]["content"]
+        assert "参加方案应为" in messages[-1]["content"] and "办理应按" in messages[-1]["content"]
+
+
+def test_source_process_alerts_are_recomputed_from_saved_observations():
+    data = showcase.get_student_dataset()
+    with_notes = without_notes = 0
+    for row in data["records"]:
+        snapshot = data["frozen_materials"][row["age_band"]]["tasks"][row["scenario_id"]]
+        actual = derive_process_alerts({**row, "literacy_answers_json": row["literacy_answers"],
+                                        "task_snapshot_json": snapshot}, row["messages"])
+        assert actual == row["process_alert_details"]
+        assert row["flags"] == [detail["code"] for detail in actual]
+        uncertain = sum(choice == 3 for choice in row["literacy_answers"].values())
+        note = next((detail for detail in actual if detail["code"] == "pretest_uncertain_answers"), None)
+        assert bool(note) == bool(uncertain)
+        if note:
+            assert note["observed_value"] == uncertain
+        assert all(detail["is_simulated"] == 1 and detail["affects_analysis"] is False for detail in actual)
+        with_notes += bool(actual)
+        without_notes += not actual
+    assert with_notes > 0 and without_notes > 0
+
+
 def test_reassigning_arms_cannot_change_outcomes_or_answers(monkeypatch):
     original = showcase.get_student_dataset()
     try:
@@ -96,6 +175,11 @@ def test_seed_is_idempotent_and_preserves_independent_interactive_rows(tmp_path)
         assert conn.execute("SELECT COUNT(*) FROM model_events WHERE event_type='reply_latency'").fetchone()[0] == 0
         stored = json.loads(conn.execute("SELECT manifest_json FROM student_showcase_imports").fetchone()[0])
         assert stored["records_sha256"] == showcase.get_student_dataset()["manifest"]["records_sha256"]
+        source_by_id = {row["id"]: row for row in showcase.get_student_dataset()["records"]}
+        for row in first:
+            source = source_by_id[row["id"]]
+            assert json.loads(row["process_alert_details_json"]) == source["process_alert_details"]
+            assert json.loads(row["flags_json"]) == source["flags"]
 
 
 @pytest.mark.parametrize("change", ["score", "message", "runtime"])
@@ -132,6 +216,19 @@ def test_old_nonempty_database_is_not_relabelled_or_overwritten(tmp_path):
         assert [tuple(row) for row in conn.execute("SELECT * FROM sessions ORDER BY id")] == before
 
 
+def test_v1_receipt_is_not_reused_to_overwrite_an_existing_database(tmp_path):
+    settings = student_settings(tmp_path)
+    init_db(settings.database_path)
+    with connect(settings.database_path) as conn:
+        seed_student_materials(conn)
+        seed(conn, settings)
+        conn.execute("UPDATE student_showcase_imports SET batch_id='student-126-20261022-v1'")
+        before = [tuple(row) for row in conn.execute("SELECT * FROM sessions ORDER BY id")]
+        with pytest.raises(ValueError, match="已有会话"):
+            seed(conn, settings)
+        assert [tuple(row) for row in conn.execute("SELECT * FROM sessions ORDER BY id")] == before
+
+
 def test_seed_guard_rejects_real_legacy_and_mismatched_database_paths(tmp_path):
     settings = student_settings(tmp_path)
     for path in (tmp_path / "lens.sqlite3", ROOT / "data" / "lens.sqlite3", ROOT / "showcase-data" / "showcase.sqlite3"):
@@ -159,6 +256,10 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
                and row["platform_analysis_eligible"] == 0 for row in rows)
     assert all(row["mean_reply_seconds"] is None for row in rows)
     assert all(row["analysis_eligible"] is False and row["showcase_analysis_eligible"] is True for row in rows)
+    expected_note_count = showcase.get_student_dataset()["manifest"]["process_alert_record_count"]
+    assert sum(bool(row["process_alert_details"]) for row in rows) == expected_note_count
+    assert all(detail["code"] == "pretest_uncertain_answers" and detail["is_simulated"] == 1
+               for row in rows for detail in row["process_alert_details"])
     for path in ("/api/admin/export?kind=raw&format=json", "/api/admin/export?kind=analysis&format=json",
                  "/api/admin/dialogue-export?format=json"):
         exported = client.get(path, headers=headers).json()
@@ -183,6 +284,10 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
         assert summary["completed_n"] == summary["analysis_n"] == 42
         assert {group["group_id"]: group["completed_n"] for group in summary["groups"]} == {"S": 21, "A": 21}
         assert summary["mean_reply_seconds"] is None
+        clues = {(item["group_id"], item["card_id"]): item["reveals"]
+                 for item in summary["evidence_reveal_distribution"]}
+        for card_id in showcase.EVIDENCE_CARD_IDS:
+            assert clues[("A", card_id)] == 21 > clues[("S", card_id)] > 0
     assert client.get("/api/admin/summary?age_band=18-24", headers=headers).status_code == 422
     # A restart checks the same batch and does not duplicate generated records.
     TestClient(create_app(settings))

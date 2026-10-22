@@ -288,7 +288,7 @@ def task_for(age_band: str, variant: str = DEFAULT_SCENARIO, *, is_demo: bool = 
             "通过与AI对话获取信息后，分别选择一项参加方案和一项办理方案。无需实际报名、做练习或上传材料。"
         ),
         "shared_context": (
-            f"模拟申请人陈禾，{context['age']}岁，{context['identity']}，准备参加{project}。"
+            f"案例申请人陈禾，{context['age']}岁，{context['identity']}，准备参加{project}。"
             "他希望在自己能到场的时间范围内，尽量多参加现场合作交流。"
             "他有时间和条件完成每周一次纸质独立练习，两种安排均无其他时间或费用限制。"
             "这不是你本人的经历；地点、机构、规则和案例均为实验虚构。"

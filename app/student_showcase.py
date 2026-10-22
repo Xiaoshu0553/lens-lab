@@ -20,22 +20,31 @@ from pathlib import Path
 
 from .config import ROOT
 from .db import task_dict
+from .process_alerts import QUALITY_VERSION, derive_process_alerts
+from .record_reporting import ai_prompt_counts
 from .student_materials import (AGE_BANDS, DESIGN_VERSION, EDUCATION_STAGES,
                                 FORM_VERSION, form_for, score_form, task_for)
 
 
-BATCH_ID = "student-126-20261022-v1"
-GENERATOR_VERSION = "student-independent-simulation-v1"
+BATCH_ID = "student-126-20261022-v2"
+GENERATOR_VERSION = "student-independent-simulation-v2"
 GENERATOR_SEED = "university-v1-independent-student-fixtures-20261022"
 ARM_SEED = "university-v1-arm-assignment-20261022"
-RENDER_VERSION = "student-authored-dialogue-v1"
+RENDER_VERSION = "student-authored-dialogue-v2"
 RECORD_COUNT = 126
 PER_AGE = 42
 SCENARIOS = ("first_3", "first_1", "return_3", "return_1")
-BASE_TIME = datetime(2026, 10, 22, 1, 0, tzinfo=timezone.utc)
+BASE_TIME = datetime(2026, 10, 22, 0, 0, tzinfo=timezone.utc)
+EVIDENCE_CARD_IDS = ("B_SCOPE", "B_REPEAT", "B_SCHEDULE", "C_TIME", "B_MATERIALS")
+EVIDENCE_POLICY = (
+    "人工模拟假设：A组在补齐两项个案事实后展示5条目标来源，S组按当前提问展示其中3条，"
+    "按S组记录顺序轮转来源。每次线索均有对应模板回复和evidence_reveal事件。"
+    "这是预设的过程展示差异，不是真实模型或受试者的观测效果；不据此调整答案或任务分数。"
+)
 NOTICE = (
     "全部为新生成的126条18–25岁在读专科或本科大学生合成记录，不是真实受试者数据。"
     "对话为人工模板，未调用模型；日期、时长和身份均为模拟值，不进入正式分析。"
+    "A组更多资料线索为人工设定的模拟假设，不代表真实干预效果。"
 )
 
 PROVENANCE_COLUMNS = {
@@ -45,6 +54,7 @@ PROVENANCE_COLUMNS = {
     "timestamp_is_simulated": "INTEGER", "platform_analysis_eligible": "INTEGER",
     "fixture_conversation": "INTEGER NOT NULL DEFAULT 0", "fixture_render_version": "TEXT",
     "student_confirmed": "INTEGER NOT NULL DEFAULT 0", "exact_age": "INTEGER",
+    "process_alert_details_json": "TEXT NOT NULL DEFAULT '[]'",
 }
 
 
@@ -95,35 +105,47 @@ def _sample_choice(options: list[dict], proficiency: float, rng: random.Random) 
 
 
 def _dialogue(row: dict, snapshot: dict) -> tuple[list[dict], list[dict]]:
-    rng = _rng(GENERATOR_SEED, row["id"] + ":dialogue")
     start = datetime.fromisoformat(row["created_at"])
     stop = datetime.fromisoformat(row["decision_started_at"])
-    # Both arms retrieve the same sampled cards. Only the authored first reply
-    # demonstrates their different system instructions; outcomes are untouched.
-    cards = snapshot["evidence_cards"]
-    desired = ("B_SCOPE", "B_REPEAT", "B_SCHEDULE", "C_TIME", "B_MATERIALS")
-    by_id = {card["id"]: card for card in cards}
-    chosen = [by_id[key] for key in desired if key in by_id]
-    if len(chosen) < 3:
-        chosen = cards[:5]
-    rng.shuffle(chosen)
-    chosen = chosen[:rng.randint(3, len(chosen))]
+    by_id = {card["id"]: card for card in snapshot["evidence_cards"]}
+    if not set(EVIDENCE_CARD_IDS) <= set(by_id):
+        raise ValueError("V2资料展示假设缺少冻结的目标来源")
+    weekly = int(row["scenario_id"].rsplit("_", 1)[1])
+    prior = row["scenario_id"].startswith("return_")
+    prior_reply = f"陈禾{'曾获得过' if prior else '从未获得过'}本项目的活动名额。"
+    weekly_reply = f"陈禾每周最多能到场{weekly}次。"
+    question = "请帮我核对这个校园项目怎样选择登记类别、参加安排和办理方案。"
     if row["group_id"] == "A":
-        first_reply = "可以。要判断登记类别和可行安排，我还需要知道：陈禾此前获得过本项目名额吗？每周最多能到场几次？"
-        first_action = "prompt_clarification"
+        chosen = [by_id[key] for key in EVIDENCE_CARD_IDS]
+        # Two actual clarification turns, one necessary fact per turn. These
+        # are authored fixtures demonstrating the policy, never model output.
+        exchanges = [
+            (question, "陈禾此前是否曾获得过本项目的活动名额？", "prompt_clarification", None),
+            (prior_reply, "陈禾每周最多能到场参加几次活动？", "prompt_clarification", None),
+            (weekly_reply, "两项个案事实已补齐，我将继续按现行资料回答原问题。", "task_answer", None),
+        ]
     else:
-        first_reply = (
-            "本次需要分别核对登记类别、参加安排，以及有效截止时间、提交地点和材料。"
-            "资料中的类别取决于此前是否获得本项目名额，安排取决于每周可到场次数。"
-        )
-        first_action = "task_answer"
-    exchanges = [("请帮我核对这个校园项目怎样选择登记类别、参加安排和办理方案。", first_reply, first_action, None),
-                 (snapshot["participant_facts"], "已收到这两项案例情况，核对资料时将按本案例应用，不额外推断。", "task_answer", None)]
-    for card in chosen:
-        exchanges.append((f"请依据现行资料说明：{card['title']}。", f"资料 {card['id']}｜{card['title']}\n{card['body']}", "evidence", card["id"]))
+        # Rotate three cards through the 21 standard records in each age band.
+        # Every card is therefore shown fewer than 21 times, without editing a
+        # summary number or changing any sampled questionnaire/decision score.
+        offset = row["fixture_arm_index"] % len(EVIDENCE_CARD_IDS)
+        chosen = [by_id[EVIDENCE_CARD_IDS[(offset + index) % len(EVIDENCE_CARD_IDS)]] for index in range(3)]
+        exchanges = [
+            (question, "登记类别取决于此前是否获得本项目名额，参加安排取决于每周最多可到场次数；未提供的情况不能默认满足。", "task_answer", None),
+            (prior_reply + weekly_reply, "已收到两项案例情况，下面依据你提出的资料问题核对。", "task_answer", None),
+        ]
+    for index, card in enumerate(chosen):
+        answer = f"资料 {card['id']}｜{card['title']}\n{card['body']}"
+        if index == len(chosen) - 1:
+            category = "登记乙" if prior else "登记甲"
+            plan = "现场安排" if weekly >= 2 else "弹性安排"
+            answer += (f"\n结合已提供的案例事实，参加方案应为{category}和{plan}。"
+                       "办理应按更正后的11月18日17:00期限，到活动服务点提交报名表和参加计划。")
+        exchanges.append((f"请依据现行资料说明：{card['title']}。", answer, "evidence", card["id"]))
     messages, events = [], []
     provenance = {"is_synthetic": 1, "source": "student_authored_fixture", "source_batch_id": BATCH_ID,
-                  "conversation_source": "authored_template_not_model_output", "timestamp_is_simulated": 1}
+                  "conversation_source": "authored_template_not_model_output", "timestamp_is_simulated": 1,
+                  "evidence_policy_is_simulated_assumption": True, "render_version": RENDER_VERSION}
     for index, (question, answer, action, card_id) in enumerate(exchanges):
         user_at = (start + (stop - start) * ((2 * index + 1) / (2 * len(exchanges) + 1))).isoformat(timespec="seconds")
         reply_at = (start + (stop - start) * ((2 * index + 2) / (2 * len(exchanges) + 1))).isoformat(timespec="seconds")
@@ -150,8 +172,9 @@ def _generated_dataset() -> dict:
         materials[age] = {"form_version": version, "items": copy.deepcopy(items), "tasks": tasks}
         arm_ids = ["S"] * (PER_AGE // 2) + ["A"] * (PER_AGE // 2)
         _rng(ARM_SEED, age).shuffle(arm_ids)
+        arm_indices = Counter()
         for index in range(PER_AGE):
-            record_id = f"SYNTH-STUDENT-V1-{age}-{index + 1:03d}"
+            record_id = f"SYNTH-STUDENT-V2-{age}-{index + 1:03d}"
             rng = _rng(GENERATOR_SEED, record_id)
             proficiency = rng.uniform(0.32, 0.95)
             answers = {}
@@ -163,7 +186,7 @@ def _generated_dataset() -> dict:
             snapshot = tasks[scenario]
             decision = _sample_choice(snapshot["decision_options"], proficiency, rng)
             execution = _sample_choice(snapshot["execution_options"], proficiency, rng)
-            start = BASE_TIME + timedelta(minutes=len(records) * 8)
+            start = BASE_TIME + timedelta(minutes=len(records) * 3)
             dialogue_seconds, decision_seconds = rng.randint(150, 540), rng.randint(35, 150)
             low_age, high_age = (int(value) for value in age.split("-"))
             # Arm is copied only after every answer, choice and random timing
@@ -188,7 +211,7 @@ def _generated_dataset() -> dict:
                 "created_at": start.isoformat(timespec="seconds"),
                 "decision_started_at": (start + timedelta(seconds=dialogue_seconds)).isoformat(timespec="seconds"),
                 "ended_at": (start + timedelta(seconds=dialogue_seconds + decision_seconds)).isoformat(timespec="seconds"),
-                "synthetic_pretest_time_seconds": rng.randint(240, 900),
+                "synthetic_pretest_time_seconds": None,
                 "task_completion_seconds": dialogue_seconds + decision_seconds,
                 "dialogue_elapsed_seconds": dialogue_seconds, "decision_elapsed_seconds": decision_seconds,
                 "mean_reply_seconds": None, "actual_model_latency_ms": None,
@@ -197,10 +220,18 @@ def _generated_dataset() -> dict:
             }
             row["group_id"] = arm_ids[index]
             row["interaction_condition"] = "standard" if row["group_id"] == "S" else "adaptive"
+            row["fixture_arm_index"] = arm_indices[row["group_id"]]
+            arm_indices[row["group_id"]] += 1
             row["messages"], row["model_events"] = _dialogue(row, snapshot)
             row["user_turns"] = sum(message["role"] == "user" for message in row["messages"])
             row["clarification_count"] = sum(message["action"] == "prompt_clarification" for message in row["messages"])
             row["evidence_reveals"] = sum(event["event_type"] == "evidence_reveal" for event in row["model_events"])
+            row.update(ai_prompt_counts(row["messages"]))
+            selected_text = f"参加方案：{decision['text']}\n办理方案：{execution['text']}"
+            row["submission"] = selected_text
+            row["process_alert_details"] = derive_process_alerts(
+                {**row, "literacy_answers_json": answers, "task_snapshot_json": snapshot, "submission": selected_text}, row["messages"])
+            row["flags"] = [item["code"] for item in row["process_alert_details"]]
             records.append(row)
     manifest = {
         "source_batch_id": BATCH_ID, "design_version": DESIGN_VERSION, "form_version": FORM_VERSION,
@@ -217,6 +248,14 @@ def _generated_dataset() -> dict:
         "actual_model_calls": 0, "actual_model_latency_ms": None,
         "generation_rule": "new answer vectors and decisions sampled before independent balanced arm assignment; fixed seed, no outcome calibration",
         "conversation_source": "authored_template_not_model_output",
+        "evidence_policy": EVIDENCE_POLICY,
+        "evidence_policy_is_simulated_assumption": True,
+        "evidence_cards_per_record": {"S": 3, "A": 5},
+        "evidence_card_ids": list(EVIDENCE_CARD_IDS),
+        "pretest_duration_recorded": False,
+        "process_quality_version": QUALITY_VERSION,
+        "process_alert_record_count": sum(bool(row["process_alert_details"]) for row in records),
+        "process_alert_code_counts": dict(Counter(detail["code"] for row in records for detail in row["process_alert_details"])),
         "materials_sha256": _digest(materials), "records_sha256": _digest(records), "notice": NOTICE,
     }
     return {"records": records, "manifest": manifest, "frozen_materials": materials}
@@ -298,7 +337,8 @@ def seed_student_showcase(conn: sqlite3.Connection, settings, model_config_id: s
                        "submission": f"参加方案：{selected['text']}\n办理方案：{execution['text']}",
                        "review_status": "valid", "reviewer": "student-synthetic-generator", "review_reason": "synthetic_fixture_only",
                        "reviewed_at": source["ended_at"], "score_note": "合成选择自动复算 student-decision-v1；非真实观测",
-                       "flags_json": "[]", "feedback_json": "{}"})
+                       "flags_json": _json(source["flags"]),
+                       "process_alert_details_json": _json(source["process_alert_details"]), "feedback_json": "{}"})
         messages = [(source["id"], item["role"], item["content"], item["action"], item["created_at"]) for item in source["messages"]]
         events = [(source["id"], item["event_type"], _json(item["detail"]), item["created_at"]) for item in source["model_events"]]
         history = [(source["id"], "valid", "synthetic_fixture_only", "student-synthetic-generator", source["ended_at"])]

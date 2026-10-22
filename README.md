@@ -19,7 +19,7 @@ LENS Lab 是挑战杯课题《面向语言表达差异的生成式人工智能�
 - **直接回答**：真实模型根据冻结的统一资料回答用户当前问题，可解释、比较或给出有依据的建议；资料未覆盖的内容应明确说明，不再用固定资料卡话术代替回答。
 - **研究后台**：分组与任务表现、问卷逐题分析、过程提醒、只读记录、完整对话及 CSV／JSON 导出。
 - **恢复与审计**：请求去重、断线恢复、首次提交冻结、版本快照、UTC 原始时点与北京时间显示。
-- **研究者试跑与展示**：真实模型试跑使用独立记录；另有 126 条大学生合成展示记录，明确标注其非真实参与者、非实际模型输出。
+- **研究者试跑与展示**：真实模型试跑使用独立记录；另有 126 条大学生合成展示记录，下载及机器来源元数据保留非真实参与者、非实际模型输出标记。
 
 ## 本地快速启动
 
@@ -62,7 +62,7 @@ macOS／Linux 也可在克隆后运行 `bash start.sh`，自动创建虚拟环�
 STUDY_MODE=pilot
 MODEL_BASE_URL=http://127.0.0.1:11434/v1
 MODEL_NAME=your-installed-model
-MODEL_API_KEY=
+MODEL_API_KEY=自行填写API
 MODEL_MAX_TOKENS=1600
 CLARIFICATION_STRATEGY=prompt
 ```
@@ -83,16 +83,16 @@ CLARIFICATION_STRATEGY=prompt
 
 ```bash
 python3 scripts/setup.py
-mkdir -p university-data synthetic-datasets
+mkdir -p university-data
 docker compose up -d --build
 docker compose ps
 ```
 
 应用绑定到 `127.0.0.1:8000`，数据库通过 `university-data/` 持久化；Compose 内部使用 `/app/data/lens.sqlite3`，覆盖本地 `.env` 的相对数据库路径。HTTPS、反向代理、备份与生产配置见 [部署说明](deploy/README.md)。
 
-`compose.showcase.yaml` 用于隔离的大学生合成展示实例，在 `university-showcase-data/showcase.sqlite3` 中创建当前 126 条合成记录。数据来自当前冻结材料和确定性模拟生成器，不调用真实模型，也不代表实验结果。普通 `demo` 启动仍从空记录开始。
+`compose.showcase.yaml` 用于隔离的大学生合成展示实例，在 `university-showcase-data/showcase.sqlite3` 中创建当前 126 条合成记录。当前批次为 `student-126-20261022-v2`，数据来自冻结材料与确定性生成器，不调用真实模型。前测答案和决策在独立分组前生成；人工对话另预设 A 组每条记录 5 张资料线索、S 组 3 张，对应实际模板回复。线索差属于展示假设，不能当作真实模型或用户的干预效应。普通 `demo` 启动仍从空记录开始。
 
-已有合成展示站点时，可用 `compose.preview.yaml` 和独立 API 前缀将 `/admin/preview` 接到真实模型实例。展示首页和真实试跑均使用当前大学生材料，分别写入独立的新库；旧跨年龄数据库保留为历史归档，不导入当前 126 条展示。此入口仅供已登录管理员试跑，配置与路由见 [部署说明](deploy/README.md)。
+已有合成展示站点时，可用 `compose.preview.yaml` 和独立 API 前缀将 `/admin/preview` 接到真实模型实例。展示首页和真实试跑均使用当前大学生材料，分别写入独立的新库；旧跨年龄库、旧 600 条来源包和 V1 展示库先转存到服务器外私有备份，核验后从服务器移除，不导入当前 V2 展示；服务器工作目录只保留两个在用学生数据目录。此入口仅供已登录管理员试跑，配置与路由见 [部署说明](deploy/README.md)。
 
 ## 架构与目录
 

@@ -39,9 +39,12 @@ def test_catalogue_contains_only_new126_student_batch(client):
     assert len(datasets) == 1
     data = datasets[0]
     assert data["id"] == BATCH_ID and data["n_total"] == data["n_completed"] == 126
+    assert BATCH_ID == "student-126-20261022-v2"
     assert data["n_dropout"] == 0 and data["design_version"] == "university-v1"
     assert data["age_range"] == [18, 25] and data["education_stages"] == ["college", "bachelor"]
     assert "不是真实受试者" in data["notice"] and "不能作为" in data["calibration_note"]
+    assert data["evidence_policy_is_simulated_assumption"] is True
+    assert "人工模拟假设" in data["evidence_policy"]
     assert {item["key"] for item in data["files"]} == set(EXPORT_FILES)
     assert "20261020-600" not in response.text and "calibrated_csv" not in response.text
 
@@ -72,12 +75,31 @@ def test_csv_json_zip_all_hold_the_same_single_batch():
         assert json.loads(flat["literacy_answers"]) == row["literacy_answers"]
         assert flat["actual_model_latency_ms"] == flat["mean_reply_seconds"] == ""
         assert flat["platform_analysis_eligible"] == "0" and flat["student_confirmed"] == "1"
+        assert flat["synthetic_pretest_time_seconds"] == ""
+        assert json.loads(flat["process_alert_details"]) == row["process_alert_details"]
+        assert json.loads(flat["flags"]) == row["flags"]
+        assert row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V2-")
     with zipfile.ZipFile(io.BytesIO(payloads["zip"])) as archive:
         assert set(archive.namelist()) == {EXPORT_FILES[key][0] for key in payloads if key != "zip"}
         for key in payloads:
             if key != "zip":
                 assert archive.read(EXPORT_FILES[key][0]) == payloads[key]
     assert json.loads(payloads["manifest_json"]) == get_student_dataset()["manifest"]
+    assert "人工模拟假设" in payloads["readme"].decode()
+    assert "不是真实模型" in payloads["readme"].decode()
+
+
+def test_a_legacy_external_directory_cannot_replace_the_current_v2_exports(tmp_path):
+    old = tmp_path / "student-126-20261022-v1"
+    old.mkdir()
+    (old / EXPORT_FILES["json"][0]).write_text('[{"id":"old-v1-only"}]')
+    app = FastAPI()
+    register_student_synthetic_exports(app, lambda: "test-admin", tmp_path)
+    client = TestClient(app)
+    rows = client.get("/api/admin/synthetic-export?file=json").json()
+    assert len(rows) == 126
+    assert all(row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V2-") for row in rows)
+    assert "old-v1-only" not in json.dumps(rows)
 
 
 def test_artifact_writer_is_idempotent_and_refuses_changed_files(tmp_path):

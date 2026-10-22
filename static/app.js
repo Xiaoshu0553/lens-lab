@@ -377,7 +377,7 @@ async function init() {
     }
     show("mode-banner");
     $("mode-banner").textContent = RESEARCHER_PREVIEW
-      ? info.study_mode === "demo" ? "研究者试跑 · 规则演示。" : "研究者试跑 · 真实模型。"
+      ? "研究者试跑。"
       : info.study_mode === "live"
       ? "正式实验 · 请独立完成本次任务。" : "任务测试 · 先完成信息素养测试，再与 AI 查证资料。";
     if (info.age_bands.some((band) => band.id === draft.ageBand)) {
