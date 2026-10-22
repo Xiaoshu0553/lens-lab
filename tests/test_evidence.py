@@ -116,7 +116,9 @@ def test_both_arms_reply_uncovered_and_record_no_evidence_reveal(tmp_path, strat
         admin_password="test-password", model_api_key="test-key", model_base_url="https://example.invalid/v1",
         model_name="test-model", model_temperature=0, assignment_seed="routing-test")
     app = create_app(replace(cfg, clarification_strategy=strategy))
-    provider = RouteProvider()
+    # The model now explains missing coverage itself. The participant must get
+    # that answer, rather than a lexical gate suppressing the model call.
+    provider = RouteProvider("当前任务资料未提供绩点门槛，无法确认；未载明不代表没有这项要求。")
     app.state.provider = provider
     client = TestClient(app)
     sessions = [client.post("/api/start", json=start_payload()).json() for _ in range(2)]
@@ -124,12 +126,13 @@ def test_both_arms_reply_uncovered_and_record_no_evidence_reveal(tmp_path, strat
     for session in sessions:
         response = client.post(f"/api/session/{session['session_id']}/message",
                                json={"content": "绩点门槛？"}).json()
-        assert response["action"] == "guidance" and "未提供" in response["content"]
+        assert response["action"] == "answer" and "未提供" in response["content"]
         assert "绩点" in response["content"] and "不代表没有" in response["content"]
         assert "重复名额" not in response["content"]
-    assert not provider.calls
+    assert len(provider.calls) == 2
+    assert all(call[-1] == {"role": "user", "content": "绩点门槛？"} for call in provider.calls)
     with connect(cfg.database_path) as db:
         assert db.execute("SELECT COUNT(*) FROM model_events WHERE event_type='evidence_reveal'").fetchone()[0] == 0
         events = [json.loads(row[0]) for row in db.execute(
             "SELECT detail_json FROM model_events WHERE event_type='evidence_route'")]
-    assert len(events) == 2 and all(event["status"] == "not_covered" for event in events)
+    assert events == []

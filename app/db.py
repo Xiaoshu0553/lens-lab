@@ -156,6 +156,7 @@ def init_db(path: Path) -> None:
             "decision_started_at": "TEXT",
             "age_band": "TEXT",
             "education_stage": "TEXT",
+            "student_confirmed": "INTEGER NOT NULL DEFAULT 0",
             "topic_familiarity": "INTEGER",
             "anchor_score": "INTEGER",
             "guardian_consented": "INTEGER NOT NULL DEFAULT 0",

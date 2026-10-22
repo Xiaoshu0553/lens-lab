@@ -12,6 +12,7 @@ import pytest
 import app.main as main_module
 import app.showcase_seed as showcase
 import app.showcase_rendering as rendering
+import app.student_showcase as student_showcase
 from app.age_forms import AGE_BANDS, form_for, score_form
 from app.age_tasks import task_for
 from app.db import connect, init_db
@@ -233,15 +234,15 @@ def test_create_app_rejects_hardlink_to_production_before_initialization(tmp_pat
     demo.parent.mkdir()
     demo.hardlink_to(production)
     assert demo.samefile(production)
-    monkeypatch.setattr(showcase, "ROOT", protected_root)
+    monkeypatch.setattr(student_showcase, "ROOT", protected_root)
     cfg = replace(settings(tmp_path), database_path=demo, showcase_mode=True)
 
     def forbidden_initialization(*_args, **_kwargs):
         pytest.fail("database initialization ran before the showcase hardlink guard")
 
     monkeypatch.setattr(main_module, "init_db", forbidden_initialization)
-    monkeypatch.setattr(main_module, "seed_demo", forbidden_initialization)
-    with pytest.raises(ValueError, match="现有受试者数据库"):
+    monkeypatch.setattr(main_module, "seed_student_materials", forbidden_initialization)
+    with pytest.raises(ValueError, match="不能覆盖真实受试者数据库"):
         main_module.create_app(cfg)
     assert production.read_bytes() == b"existing participant database must stay untouched"
 

@@ -84,15 +84,15 @@ test('submission carries the separate execution token and waits for saved state'
 
 test('researcher preview cannot resume or clear the participant storage namespace', async () => {
   const preview = fixtures(true);
-  const local = new preview.Storage({lens_session_id: 'participant', lens_preview_session_id: 'trial'});
-  const drafts = new preview.Storage({lens_pretest_draft_v1: '{"participant":"kept"}', lens_pending_message: '{"participant":"kept"}'});
+  const local = new preview.Storage({lens_university_v1_session_id: 'participant', lens_university_v1_preview_session_id: 'trial'});
+  const drafts = new preview.Storage({lens_university_v1_pretest_draft_v1: '{"participant":"kept"}', lens_university_v1_pending_message: '{"participant":"kept"}'});
   const h = preview.harness({localStorage: local, sessionStorage: drafts});
   assert.equal(h.value('sessionId'), 'trial');
-  assert.equal(h.value('STORAGE_KEY'), 'lens_preview_session_id');
+  assert.equal(h.value('STORAGE_KEY'), 'lens_university_v1_preview_session_id');
   await h.run('beginNewSession()');
-  assert.equal(local.getItem('lens_session_id'), 'participant');
-  assert.equal(drafts.getItem('lens_pretest_draft_v1'), '{"participant":"kept"}');
-  assert.equal(drafts.getItem('lens_pending_message'), '{"participant":"kept"}');
+  assert.equal(local.getItem('lens_university_v1_session_id'), 'participant');
+  assert.equal(drafts.getItem('lens_university_v1_pretest_draft_v1'), '{"participant":"kept"}');
+  assert.equal(drafts.getItem('lens_university_v1_pending_message'), '{"participant":"kept"}');
 });
 
 function adminHarness(data = {}) {
@@ -101,7 +101,7 @@ function adminHarness(data = {}) {
   for (const id of ['task-form', 'refresh-button', 'admin-age-band', 'pretest-analysis']) {
     const element = document.createElement(id === 'task-form' ? 'form' : 'div'); element.id = id; document.append(element);
   }
-  document.getElementById('admin-age-band').value = '18-24';
+  document.getElementById('admin-age-band').value = '18-20';
   const context = vm.createContext({document, localStorage: new Storage(), console,
     fetch: async () => response(data)});
   const script = fs.readFileSync(path.join(__dirname, '../static/admin.js'), 'utf8')

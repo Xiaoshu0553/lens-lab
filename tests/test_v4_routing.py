@@ -1,4 +1,4 @@
-"""Frozen-evidence routing for v4 cases; no live model or participant data."""
+"""Historical/offline routing helpers for v4 cases; live dialogue uses separate prompts."""
 
 import asyncio
 import json
@@ -155,5 +155,8 @@ def test_prior_fact_uses_activity_wording_and_never_reads_private_scenario():
 def test_historical_funding_task_and_prompt_versions_remain_supported():
     reply = case_fact_question_reply(PILOT_TASK_V5, users("林澈的家庭收入是多少？"))
     assert "还不知道" in reply
-    assert ANSWER_PROMPT_VERSION == ROUTER_VERSION == "evidence-router-v5"
-    assert DECISION_PROMPT_VERSION == "clarify-v3" and PROMPT_ONLY_VERSION == "clarify-router-v3"
+    assert ROUTER_VERSION == "evidence-router-v5"  # Frozen legacy/offline routing.
+    assert DECISION_PROMPT_VERSION == "clarify-v3"  # Offline decision simulation.
+    assert ANSWER_PROMPT_VERSION == "answer-dialogue-v6"
+    assert PROMPT_ONLY_VERSION == "clarify-dialogue-v4"
+    assert ANSWER_PROMPT_VERSION != ROUTER_VERSION

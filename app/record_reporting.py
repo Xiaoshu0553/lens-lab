@@ -91,6 +91,20 @@ def cohort_exclusion_reasons(row, *, settings, design_version, strategy,
     for matches, reason in comparisons:
         if not matches:
             reasons.append(reason)
+    if design_version == "university-v1":
+        from .student_materials import AGE_BANDS, EDUCATION_STAGES
+        if row["age_band"] not in AGE_BANDS:
+            reasons.append("不属于18–25岁大学生年龄范围")
+        if row["education_stage"] not in EDUCATION_STAGES:
+            reasons.append("不属于在读专科或本科阶段")
+        if "student_confirmed" not in row.keys() or row["student_confirmed"] != 1:
+            reasons.append("未确认当前在读大学生身份")
+        if record_kind == "participant":
+            if (("is_synthetic" in row.keys() and row["is_synthetic"] == 1)
+                    or ("data_origin" in row.keys() and row["data_origin"] == "synthetic")):
+                reasons.append("合成记录不能纳入真实参与者分析")
+            if "platform_analysis_eligible" in row.keys() and row["platform_analysis_eligible"] == 0:
+                reasons.append("记录明确标记为不得纳入正式分析")
     return reasons
 
 

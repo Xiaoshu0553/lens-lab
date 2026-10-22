@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel, Field, StrictInt, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
 
 from .clarify import decide_clarification
 from .clean_exports import (DIALOGUE_COLUMNS, DIALOGUE_METADATA_KEYS, RECORD_COLUMNS, chinese_csv,
@@ -23,27 +23,26 @@ from .clean_exports import (DIALOGUE_COLUMNS, DIALOGUE_METADATA_KEYS, RECORD_COL
                             process_alert_details, record_id_map, utc_timestamp)
 from .admin_auth import (ADMIN_PAGES, BROWSER_COOKIE, SESSION_COOKIE, SESSION_SECONDS, is_https, issue_session,
                          require_same_origin, valid_session)
-from .age_forms import AGE_BANDS, form_for, public_form, score_form
-from .config import ROOT, Settings
+from .student_materials import (AGE_BANDS, DESIGN_VERSION, EDUCATION_STAGES, FORM_VERSION,
+                                form_for, public_form, score_form)
+from .config import ROOT, Settings, validate_preview_api_prefix
 from .db import connect, init_db, now_utc, task_dict
 from .evidence import (asks_for_decision, asks_for_overview, broad_reply, case_fact_question_reply, evidence_reply, fact_evidence_card,
                        greeting_reply, is_greeting, missing_slots, overview_reply, participant_fact_reply, route_question,
                        uncovered_question, unmatched_reply)
-from .literacy import VERSION as LITERACY_VERSION, ITEMS as LITERACY_ITEMS, public_items, score_answers
 from .item_analysis import analyze as analyze_pretest
-from .instrument_review import inventory, render_review_html
+from .student_review import inventory, render_review_html
 from .outcomes import compare_conditions
 from .record_reporting import (ai_prompt_counts, ai_prompt_totals, automatic_analysis_reasons,
                                cohort_exclusion_reasons, record_times)
-from .model import (ANSWER_PROMPT_VERSION, CLARIFICATION_MARKER, DECISION_PROMPT_VERSION,
+from .model import (ANSWER_PROMPT_VERSION, CLARIFICATION_MARKER,
                     PROMPT_ONLY_VERSION, DemoProvider, LiveProvider, ModelError,
                     answer_system_prompt, prompt_only_system_prompt)
-from .seed import seed_demo
-from .synthetic_exports import register_synthetic_exports
-from .showcase_seed import guard_showcase_database, seed_showcase
+from .student_seed import seed_student_materials
+from .student_synthetic_exports import register_student_synthetic_exports
+from .student_showcase import guard_student_showcase_database, seed_student_showcase
 
 
-DESIGN_VERSION = "literacy-age-v5"
 GROUPS = {"S": "standard", "A": "adaptive"}
 security = HTTPBasic(auto_error=False)
 
@@ -64,6 +63,7 @@ class StartRequest(BaseModel):
     consent: bool
     age_band: str
     education_stage: str = Field(min_length=1, max_length=80)
+    student_confirmed: StrictBool = False
     topic_familiarity: StrictInt = Field(ge=1, le=5)
     participant_assent: bool = False
     guardian_consent: bool = False
@@ -77,8 +77,8 @@ class StartRequest(BaseModel):
     @field_validator("education_stage")
     @classmethod
     def education_not_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("请选择教育阶段")
+        if value.strip() not in EDUCATION_STAGES:
+            raise ValueError("仅限当前在读专科或本科生参加")
         return value.strip()
 
 
@@ -277,6 +277,8 @@ def _session_view(row: dict, task: dict, messages: list[dict], settings: Setting
         "prompt_version": row["prompt_version"],
         "literacy_instrument_version": row["literacy_instrument_version"],
         "age_band": row["age_band"],
+        "education_stage": row.get("education_stage"),
+        "student_confirmed": row.get("student_confirmed") == 1,
         "literacy_band_width": row["literacy_band_width"],
         "model_config_id": row["model_config_id"],
         "interaction_condition": row["interaction_condition"],
@@ -313,7 +315,8 @@ def _add_event(db, session_id: str, kind: str, detail: dict) -> None:
 
 
 def _flags(messages: list[dict], submission: str, start: str, end: str, keywords: list[str],
-           decision_choice_id: str | None = None, evidence_count: int = 0) -> list[str]:
+           decision_choice_id: str | None = None, evidence_count: int = 0, *,
+           evidence_tracking: bool = True) -> list[str]:
     users = [m["content"].strip() for m in messages if m["role"] == "user"]
     combined = " ".join(users + [submission.strip()])
     flags = []
@@ -321,7 +324,7 @@ def _flags(messages: list[dict], submission: str, start: str, end: str, keywords
         flags.append("no_user_message")
     if not submission.strip() and not decision_choice_id:
         flags.append("empty_submission")
-    if decision_choice_id and evidence_count == 0:
+    if decision_choice_id and evidence_tracking and evidence_count == 0:
         flags.append("no_evidence_retrieved")
     if len("".join(users).strip()) < 12:
         flags.append("very_short_dialogue")
@@ -347,11 +350,12 @@ def _csv_safe(value):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    validate_preview_api_prefix(settings.preview_api_prefix)
     if settings.showcase_mode and (settings.study_mode != "demo"
             or settings.database_path.resolve().name != "showcase.sqlite3"):
         raise ValueError("演示成品必须使用 demo 模式与独立的 showcase.sqlite3")
     if settings.showcase_mode:
-        guard_showcase_database(settings)
+        guard_student_showcase_database(settings)
     dataset_root = settings.synthetic_dataset_root or ROOT / "synthetic-datasets"
     cohort_record_kind = "synthetic" if settings.showcase_mode else "participant"
     model_config_id = hashlib.sha256(json.dumps({
@@ -360,17 +364,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "max_tokens": settings.model_max_tokens,
     }, sort_keys=True).encode()).hexdigest()[:16]
     init_db(settings.database_path)
-    if settings.study_mode != "live":
-        seed_demo(settings.database_path, settings.study_mode)
+    with connect(settings.database_path) as db:
+        seed_student_materials(db, is_demo=settings.study_mode != "live")
     app = FastAPI(title="LENS Lab 实验平台", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.provider = DemoProvider() if settings.study_mode == "demo" else LiveProvider(settings)
-    strategy = "module" if settings.study_mode == "demo" else settings.clarification_strategy
-    cohort_prompts = (ANSWER_PROMPT_VERSION, ANSWER_PROMPT_VERSION + "+" + (
-        PROMPT_ONLY_VERSION if strategy == "prompt" else DECISION_PROMPT_VERSION))
+    # Legacy `module` settings are accepted, but new sessions always use the
+    # requested two-arm design: ordinary dialogue vs. an extra system instruction.
+    strategy = "prompt"
+    cohort_prompts = (ANSWER_PROMPT_VERSION, ANSWER_PROMPT_VERSION + "+" + PROMPT_ONLY_VERSION)
     if settings.showcase_mode:
-        seed_showcase(settings, model_config_id=model_config_id, cohort_prompts=cohort_prompts,
-                      strategy=strategy, dataset_root=dataset_root, design_version=DESIGN_VERSION)
+        with connect(settings.database_path) as db:
+            seed_student_showcase(db, settings, model_config_id=model_config_id, cohort_prompts=cohort_prompts,
+                                  strategy=strategy, design_version=DESIGN_VERSION)
     with connect(settings.database_path) as db:
         db.execute("BEGIN IMMEDIATE")
         initialize_record_aliases(db)
@@ -412,11 +418,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"groups": groups, "gap_standard": gaps["S"], "gap_adaptive": gaps["A"],
                 "cohort_session_ids": [row["id"] for row in rows], "analysis_n": len(rows)}
 
-    def current_cohort_reasons(row, active):
+    def current_cohort_reasons(row, active, record_kind=cohort_record_kind):
         return cohort_exclusion_reasons(row, settings=settings, design_version=DESIGN_VERSION,
             strategy=strategy, model_config_id=model_config_id, active_task_ids=active,
             form_versions=form_versions,
-            prompts=dict(zip(('standard', 'adaptive'), cohort_prompts)), record_kind=cohort_record_kind)
+            prompts=dict(zip(('standard', 'adaptive'), cohort_prompts)), record_kind=record_kind)
 
     def analysis_reasons(row, active):
         reasons = current_cohort_reasons(row, active)
@@ -440,8 +446,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def private_admin_responses(request: Request, call_next):
+        if (settings.researcher_preview_only and request.url.path.startswith("/api/")
+                and request.url.path != "/api/admin/login"):
+            try:
+                require_admin(request, await optional_basic(request))
+            except HTTPException as exc:
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                                    headers={**(exc.headers or {}), "Cache-Control": "no-store"})
         response = await call_next(request)
-        if request.url.path.startswith(("/admin", "/api/admin/")):
+        if (request.url.path.startswith(("/admin", "/api/admin/"))
+                or settings.researcher_preview_only and request.url.path.startswith("/api/")):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Referrer-Policy"] = "same-origin"
             response.headers["X-Content-Type-Options"] = "nosniff"
@@ -466,7 +480,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(401, "需要管理员登录")
         return credentials.username
 
-    register_synthetic_exports(app, require_admin, dataset_root)
+    register_student_synthetic_exports(app, require_admin, dataset_root)
 
     @app.get("/admin/login")
     def admin_login_page():
@@ -495,6 +509,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def participant_page():
         return FileResponse(ROOT / "static" / "index.html")
 
+    @app.get("/healthz")
+    def health():
+        return {"status": "ok"}
+
     @app.get("/static/{name}")
     def static_file(name: str):
         if name not in {"app.js", "admin.js", "admin-login.js", "admin-synthetic.js", "style.css"}:
@@ -508,28 +526,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/admin/preview")
     def preview_page(admin: str = Depends(require_admin)):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-        return HTMLResponse(html.replace("<body>", '<body data-researcher-preview="true">'))
+        prefix = f' data-api-prefix="{settings.preview_api_prefix}"' if settings.preview_api_prefix else ""
+        return HTMLResponse(html.replace("<body>", f'<body data-researcher-preview="true"{prefix}>'))
 
     @app.get("/api/info")
-    def info():
+    def info(request: Request, researcher_preview: bool = False,
+             credentials: HTTPBasicCredentials | None = Depends(optional_basic)):
+        if researcher_preview:
+            require_admin(request, credentials)
         with connect(settings.database_path) as db:
             count = db.execute("SELECT COUNT(*) FROM tasks WHERE active=1 AND is_demo=?", (int(settings.study_mode != "live"),)).fetchone()[0]
             showcase_totals = showcase_record_totals(db)
         local_provider = urlparse(settings.model_base_url).hostname in {"localhost", "127.0.0.1", "::1"}
         return {"study_mode": settings.study_mode, "showcase_mode": settings.showcase_mode,
+                "researcher_preview": researcher_preview,
                 "showcase_totals": showcase_totals, "has_active_task": bool(count),
                 "max_turns": settings.max_turns, "max_minutes": settings.max_minutes, "provider_local": local_provider,
                 "clarification_strategy": strategy, "answer_prompt_version": ANSWER_PROMPT_VERSION,
-                "design_version": DESIGN_VERSION, "literacy_instrument_version": LITERACY_VERSION,
+                "design_version": DESIGN_VERSION, "literacy_instrument_version": FORM_VERSION,
                 "age_bands": [{"id": key, **value} for key, value in AGE_BANDS.items()],
-                "minor_recruitment_open": settings.study_mode == "demo" or bool(settings.minor_access_code),
-                "minor_access_code_required": bool(settings.minor_access_code),
-                "under14_recruitment_open": settings.study_mode == "demo" or bool(
-                    settings.minor_access_code and settings.under14_privacy_notice_url.startswith("https://")),
-                "under14_privacy_notice_url": settings.under14_privacy_notice_url,
+                "eligibility": {"minimum_age": 18, "maximum_age": 25, "enrollment_required": True,
+                                "education_stages": [{"id": key, "label": value} for key, value in EDUCATION_STAGES.items()]},
+                "minor_recruitment_open": False, "minor_access_code_required": False,
+                "under14_recruitment_open": False, "under14_privacy_notice_url": "",
                 "literacy_band_width": settings.literacy_band_width,
                 "model_config_id": model_config_id,
-                "access_code_required": bool(settings.participant_access_code)}
+                "access_code_required": not researcher_preview and bool(settings.participant_access_code)}
 
     @app.get("/api/pretest")
     def pretest(age_band: str):
@@ -540,25 +562,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/start")
     def start(body: StartRequest, request: Request, credentials: HTTPBasicCredentials | None = Depends(optional_basic)):
+        if settings.researcher_preview_only and not body.researcher_preview:
+            raise HTTPException(403, "此入口仅供已登录研究者试跑")
         if body.researcher_preview:
             require_admin(request, credentials)
         record_kind = "researcher_preview" if body.researcher_preview else cohort_record_kind
         if not body.consent:
             raise HTTPException(400, "只有明确同意后才能参加")
         if body.age_band not in AGE_BANDS:
-            raise HTTPException(422, "年龄组无效")
-        if AGE_BANDS[body.age_band]["family"] == "child":
-            if not body.participant_assent or not body.guardian_consent:
-                raise HTTPException(400, "未成年参与者需本人同意及监护人同意")
-            if settings.study_mode != "demo" and not settings.minor_access_code:
-                raise HTTPException(403, "未成年人预测试暂未开放；研究者需先配置监护人同意流程及专用邀请码")
-            if (body.age_band == "12-14" and settings.study_mode != "demo"
-                    and not settings.under14_privacy_notice_url.startswith("https://")):
-                raise HTTPException(403, "12–14 岁组暂未开放；研究者需先发布未满十四周岁个人信息专门处理规则")
-            if settings.minor_access_code and not secrets.compare_digest(
-                    body.minor_access_code.encode("utf-8"), settings.minor_access_code.encode("utf-8")):
-                raise HTTPException(403, "未成年人专用邀请码不正确")
-        if settings.participant_access_code and not secrets.compare_digest(
+            raise HTTPException(422, "仅限18–25岁在读专科或本科生参加，请选择有效年龄区间")
+        if not body.student_confirmed:
+            raise HTTPException(422, "请确认当前为18–25岁在读专科或本科生")
+        if not body.researcher_preview and settings.participant_access_code and not secrets.compare_digest(
                 body.access_code.encode("utf-8"), settings.participant_access_code.encode("utf-8")):
             raise HTTPException(403, "参与邀请码不正确")
         form_version, _ = form_for(body.age_band)
@@ -584,27 +599,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 existing = _recover_expired_request(db, existing)
                 return {"session_id": existing["id"],
                         **_session_view(existing, existing_task, _messages(db, existing["id"]), settings)}
-            task_row = db.execute(
-                """SELECT t.*, COUNT(s.id) AS assigned FROM tasks t
-                   LEFT JOIN sessions s ON s.task_id=t.id AND s.design_version=? AND s.clarification_strategy=?
-                   AND s.literacy_instrument_version=? AND s.literacy_band_width=?
-                   AND s.model_config_id=? AND s.run_mode=? AND s.prompt_version IN (?,?) AND s.record_kind=?
-                   WHERE t.active=1 AND t.is_demo=? AND t.age_band=?
-                   GROUP BY t.id ORDER BY assigned ASC,t.created_at ASC LIMIT 1""",
-                (DESIGN_VERSION, strategy, form_version, settings.literacy_band_width,
-                 model_config_id, settings.study_mode, *cohort_prompts, record_kind, is_demo, body.age_band),
-            ).fetchone()
+            active = active_task_ids(db)
+            # Assignment, capacity and reports use the same qualification rules.
+            # Preview sessions balance within their own separate record kind.
+            assignment_sessions = [dict(row) for row in db.execute(
+                "SELECT * FROM sessions WHERE record_kind=? AND run_mode=?", (record_kind, settings.study_mode))
+                if not current_cohort_reasons(row, active, record_kind=record_kind)]
+            candidates = db.execute("SELECT * FROM tasks WHERE active=1 AND is_demo=? AND age_band=?",
+                                    (is_demo, body.age_band)).fetchall()
+            task_row = min(candidates, key=lambda row: (
+                sum(item["task_id"] == row["id"] for item in assignment_sessions), row["created_at"], row["id"]), default=None)
             if task_row is None:
                 raise HTTPException(409, "当前没有可用任务，请管理员先创建任务")
             task = task_dict(task_row)
             if settings.study_mode != "demo" and (len(task["evidence_cards"]) < 3
                                                     or len(task["decision_options"]) != 5):
                 raise HTTPException(409, "当前任务尚未配置对话线索和五个机器评分选项")
-            assignment_rows = [dict(item) for item in db.execute(
-                "SELECT scenario_id,group_id,literacy_band,COUNT(*) AS n FROM sessions WHERE task_id=? AND design_version=? AND clarification_strategy=? AND literacy_instrument_version=? AND literacy_band_width=? AND model_config_id=? AND run_mode=? AND prompt_version IN (?,?) AND record_kind=? GROUP BY scenario_id,group_id,literacy_band",
-                (task["id"], DESIGN_VERSION, strategy, form_version, settings.literacy_band_width,
-                 model_config_id, settings.study_mode, *cohort_prompts, record_kind),
-            )]
+            cell_counts = Counter((item["scenario_id"], item["group_id"], item["literacy_band"])
+                                  for item in assignment_sessions if item["task_id"] == task["id"])
+            assignment_rows = [{"scenario_id": scenario, "group_id": group, "literacy_band": band, "n": count}
+                               for (scenario, group, band), count in cell_counts.items()]
             totals = {g: sum(item["n"] for item in assignment_rows if item["group_id"] == g) for g in GROUPS}
             eligible = [g for g in GROUPS if not settings.group_cap or totals[g] < settings.group_cap]
             if not eligible:
@@ -629,15 +643,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             interaction = GROUPS[group]
             prompt_version = ANSWER_PROMPT_VERSION
             if interaction == "adaptive":
-                prompt_version += "+" + (PROMPT_ONLY_VERSION if strategy == "prompt" else DECISION_PROMPT_VERSION)
+                prompt_version += "+" + PROMPT_ONLY_VERSION
             db.execute(
                 """INSERT INTO sessions
                 (id,task_id,group_id,expression_condition,interaction_condition,run_mode,is_demo,assignment_seed,
                  model_name,model_temperature,model_base_url,prompt_version,task_snapshot_json,created_at,
                  design_version,literacy_score,literacy_band,literacy_answers_json,literacy_instrument_version,clarification_strategy,
                  literacy_percent,literacy_band_width,model_thinking,model_max_tokens,model_config_id,
-                 age_band,education_stage,topic_familiarity,anchor_score,guardian_consented,scenario_id,record_kind)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 age_band,education_stage,topic_familiarity,anchor_score,guardian_consented,scenario_id,record_kind,student_confirmed)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sid, task["id"], group, "natural", interaction, settings.study_mode, is_demo,
                  settings.assignment_seed, settings.model_name if settings.study_mode != "demo" else "DEMO-RULE",
                  settings.model_temperature, settings.model_base_url if settings.study_mode != "demo" else "DEMO",
@@ -645,7 +659,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                  literacy_score, literacy_band, json.dumps(body.pretest_answers, ensure_ascii=False), form_version, strategy,
                  literacy_percent, settings.literacy_band_width, settings.model_thinking,
                  settings.model_max_tokens, model_config_id, body.age_band, body.education_stage.strip(),
-                 body.topic_familiarity, anchor_score, int(body.guardian_consent), scenario_id, record_kind),
+                 body.topic_familiarity, anchor_score, 0, scenario_id, record_kind, int(body.student_confirmed)),
             )
             if settings.showcase_mode:
                 db.execute("UPDATE sessions SET is_synthetic=1,data_origin='synthetic',dataset_variant='interactive_demo',platform_analysis_eligible=0 WHERE id=?", (sid,))
@@ -737,7 +751,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if session["decision_started_at"]:
                 raise HTTPException(409, "已进入决策阶段，不能继续提问")
             expected_prompt = ANSWER_PROMPT_VERSION + (
-                "+" + (PROMPT_ONLY_VERSION if strategy == "prompt" else DECISION_PROMPT_VERSION)
+                "+" + PROMPT_ONLY_VERSION
                 if session["interaction_condition"] == "adaptive" else ""
             )
             if (session["run_mode"] != settings.study_mode or session["clarification_strategy"] != strategy
@@ -766,10 +780,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             decision = None
             route = None
             evidence_id = None
-            use_prompt = session["interaction_condition"] == "adaptive" and session["clarification_strategy"] == "prompt"
-            prompt_count = sum(m["action"] == "prompt_clarification" for m in history)
+            use_prompt = session["interaction_condition"] == "adaptive"
+            system_prompt = None
             response_started = time.perf_counter()
-            if task.get("evidence_cards"):
+            if session["run_mode"] != "demo":
+                # The actual model answers every turn, including greetings,
+                # follow-ups and requests for a plan. Routing to a frozen card
+                # used to discard the question and the model's natural answer.
+                system_prompt = prompt_only_system_prompt(task) if use_prompt else answer_system_prompt(task)
+                chat_history = [{"role": m["role"], "content": m["content"]} for m in history]
+                answer = await app.state.provider.complete(
+                    [{"role": "system", "content": system_prompt}] + chat_history
+                )
+                if not isinstance(answer, str):
+                    raise ModelError("模型没有返回文本回答")
+                answer = answer.strip()
+                # Both arms share the same output marker protocol. A baseline
+                # model may naturally ask a question; never infer zero from group.
+                if answer.startswith(CLARIFICATION_MARKER):
+                    answer = answer[len(CLARIFICATION_MARKER):].strip()
+                    action = "prompt_clarification"
+                if not answer:
+                    raise ModelError("模型返回了空回答")
+            elif task.get("evidence_cards"):
                 fact_question_reply = case_fact_question_reply(task, history)
                 uncovered = uncovered_question(task, history)
                 if fact_question_reply is not None:
@@ -795,15 +828,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     action = "task_guidance"
                 else:
                     broad = asks_for_decision(content)
-                    if broad and session["interaction_condition"] == "adaptive" and session["clarification_strategy"] == "module":
-                        module_count = sum(m["action"] == "module_clarification" for m in history)
-                        if module_count < 2:
-                            decision = await decide_clarification(app.state.provider, task, history, is_demo=session["run_mode"] == "demo")
-                            missing_keys = {slot["key"] for slot in missing_slots(task, history)}
-                            if decision["need_clarification"] and decision["slot_key"] in missing_keys:
-                                slot = next(s for s in task["slots"] if s["key"] == decision["slot_key"])
-                                answer = slot["question"]
-                                action = "module_clarification"
+                    if broad and use_prompt:
+                        # Offline simulation only; pilot/live never call this
+                        # decision module or replace a model response with it.
+                        decision = await decide_clarification(app.state.provider, task, history, is_demo=True)
+                        missing_keys = {slot["key"] for slot in missing_slots(task, history)}
+                        if decision["need_clarification"] and decision["slot_key"] in missing_keys:
+                            slot = next(s for s in task["slots"] if s["key"] == decision["slot_key"])
+                            answer = slot["question"]
+                            action = "prompt_clarification"
                     if action == "answer":
                         with connect(settings.database_path) as db:
                             revealed_ids = {json.loads(row["detail_json"])["card_id"] for row in db.execute(
@@ -811,19 +844,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 (session_id,),
                             )}
                         route = await route_question(app.state.provider, task, history,
-                                                     adaptive=use_prompt and prompt_count < 2,
+                                                     adaptive=False,
                                                      revealed_ids=revealed_ids)
                         if route.get("status") == "unavailable":
                             raise ModelError("资料路由暂时不可用")
                         if broad:
-                            missing = {slot["key"]: slot for slot in missing_slots(task, history)}
-                            slot_key = route["clarify_slot"] if use_prompt and prompt_count < 2 else None
-                            if slot_key in missing:
-                                answer = missing[slot_key]["question"]
-                                action = "prompt_clarification"
-                            else:
-                                answer = broad_reply()
-                                action = "task_guidance"
+                            answer = broad_reply()
+                            action = "task_guidance"
                         else:
                             card = next((item for item in task["evidence_cards"]
                                          if item["id"] == route["card_id"]), None)
@@ -835,28 +862,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 answer = unmatched_reply(route)
                                 action = "guidance"
             else:
-                if session["interaction_condition"] == "adaptive" and session["clarification_strategy"] == "module":
-                    module_count = sum(m["action"] == "module_clarification" for m in history)
-                    if module_count < 2:
-                        decision = await decide_clarification(app.state.provider, task, history, is_demo=session["run_mode"] == "demo")
-                    else:
-                        decision = {"need_clarification": False, "slot_key": None,
-                                    "reason": "已达到模块追问上限", "source": "clarification_cap"}
+                if use_prompt:
+                    decision = await decide_clarification(app.state.provider, task, history, is_demo=True)
                     if decision["need_clarification"]:
                         slot = next(s for s in task["slots"] if s["key"] == decision["slot_key"])
                         answer = slot["question"]
-                        action = "module_clarification"
+                        action = "prompt_clarification"
                 if action == "answer":
                     chat_history = [{"role": m["role"], "content": m["content"]} for m in history]
-                    system_prompt = prompt_only_system_prompt(task) if use_prompt and prompt_count < 2 else answer_system_prompt(task)
+                    system_prompt = prompt_only_system_prompt(task) if use_prompt else answer_system_prompt(task)
                     answer = await app.state.provider.complete(
                         [{"role": "system", "content": system_prompt}] + chat_history
                     )
-                    if use_prompt and answer.lstrip().startswith(CLARIFICATION_MARKER):
+                    if answer.lstrip().startswith(CLARIFICATION_MARKER):
                         answer = answer.lstrip()[len(CLARIFICATION_MARKER):].strip()
                         action = "prompt_clarification"
                     if not answer:
-                        answer = "请补充你希望我判断的具体情况。"
+                        raise ModelError("模型返回了空回答")
             with connect(settings.database_path) as db:
                 db.execute("BEGIN IMMEDIATE")
                 current = db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
@@ -876,9 +898,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     _add_event(db, session_id, "evidence_route", route)
                 if evidence_id is not None:
                     _add_event(db, session_id, "evidence_reveal", {"card_id": evidence_id})
-                if session["interaction_condition"] == "adaptive" and session["clarification_strategy"] == "prompt":
+                if session["run_mode"] != "demo":
+                    _add_event(db, session_id, "dialogue_prompt", {
+                        "version": session["prompt_version"], "system_prompt": system_prompt,
+                        "used_extra_prompt": use_prompt,
+                    })
+                if use_prompt:
                     _add_event(db, session_id, "prompt_strategy", {"version": PROMPT_ONLY_VERSION,
-                               "used_extra_prompt": prompt_count < 2, "detected_clarification": action == "prompt_clarification"})
+                               "used_extra_prompt": True, "source": "demo_rule" if session["run_mode"] == "demo" else "model_prompt",
+                               "detected_clarification": action == "prompt_clarification"})
                 db.execute("INSERT INTO messages(session_id,role,content,action,created_at) VALUES (?,?,?,?,?)",
                            (session_id, "assistant", answer, action, now_utc()))
                 db.execute("UPDATE sessions SET pending_request_id=NULL,pending_started_at=NULL,pending_attempt_id=NULL WHERE id=?", (session_id,))
@@ -935,7 +963,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).fetchone()[0]
             end = now_utc()
             flags = _flags(_messages(db, session_id), body.submission, session["created_at"], end,
-                           task["keywords"], body.decision_choice_id, evidence_count)
+                           task["keywords"], body.decision_choice_id, evidence_count,
+                           evidence_tracking=session["run_mode"] == "demo" or session["prompt_version"].startswith("evidence-router-"))
             events = [(row["event_type"], json.loads(row["detail_json"])) for row in db.execute(
                 "SELECT event_type,detail_json FROM model_events WHERE session_id=?", (session_id,))]
             if any(kind in {"provider_error", "request_expired", "request_failed"} for kind, _ in events):
@@ -949,12 +978,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                        flags_json=?,feedback_json=? WHERE id=?""",
                        (end, body.submission.strip(), selected["id"] if selected else None,
                         execution["id"] if execution else None, feasible, optimal, quality,
-                        ("机器评分 decision-age-v4" if selected.get("score_components") else "机器评分 decision-v1") if selected else None,
+                        ("机器评分 student-campus-v1" if session["design_version"] == DESIGN_VERSION
+                         else "机器评分 decision-age-v4" if selected.get("score_components") else "机器评分 decision-v1") if selected else None,
                         json.dumps(flags, ensure_ascii=False), json.dumps(feedback, ensure_ascii=False), session_id))
         return {"submitted": True, "is_demo": bool(session["is_demo"]), "review_status": "pending"}
 
     @app.get("/api/admin/summary")
-    def summary(age_band: str = "18-24", admin: str = Depends(require_admin)):
+    def summary(age_band: str = "18-20", admin: str = Depends(require_admin)):
         if age_band not in AGE_BANDS:
             raise HTTPException(422, "年龄组无效")
         form_version, _ = form_for(age_band)
@@ -1041,9 +1071,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "mean_reply_seconds": round(sum(latencies) / len(latencies) / 1000, 2) if latencies else None}
 
     @app.get("/api/admin/tasks")
-    def admin_tasks(admin: str = Depends(require_admin)):
+    def admin_tasks(include_archived: bool = False, admin: str = Depends(require_admin)):
         with connect(settings.database_path) as db:
-            return [task_dict(row) for row in db.execute("SELECT * FROM tasks ORDER BY created_at DESC")]
+            return [{**task_dict(row), "archived_scope": row["age_band"] not in AGE_BANDS}
+                    for row in db.execute("SELECT * FROM tasks ORDER BY created_at DESC")
+                    if include_archived or row["age_band"] in AGE_BANDS]
 
     @app.get("/admin/instruments", response_class=HTMLResponse)
     def instrument_review(admin: str = Depends(require_admin)):
@@ -1055,7 +1087,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/api/admin/pretest-analysis")
-    def pretest_analysis(age_band: str = "18-24", admin: str = Depends(require_admin)):
+    def pretest_analysis(age_band: str = "18-20", admin: str = Depends(require_admin)):
         try:
             form_version, items = form_for(age_band)
         except ValueError as exc:
@@ -1071,7 +1103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                        "analysis_n": len(completed), "cohort_input_count": len(current),
                        "cohort_excluded_count": len(current) - len(completed),
                        "cohort_exclusion_reasons": dict(exclusions)})
-        report["source_note"] = ("与本年龄的素养分层和澄清结果使用同一批当前配置、已提交且前测30题合法完整的记录；"
+        report["source_note"] = ("与本大学生年龄区间的素养分层和澄清结果使用同一批当前配置、已确认在读身份、已提交且前测30题合法完整的记录；"
                                  "不需要人工审核，不按任务分数高低筛选。未完成及不符合当前配置的记录保留在原始导出。")
         return report
 
@@ -1139,6 +1171,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if task is None:
                 raise HTTPException(404)
             if active:
+                if task["age_band"] not in AGE_BANDS:
+                    raise HTTPException(409, "历史跨年龄任务仅供归档，不能启用于当前大学生研究")
                 candidate = task_dict(task)
                 if settings.study_mode != "demo" and (len(candidate["evidence_cards"]) < 3
                                                       or len(candidate["decision_options"]) != 5):
@@ -1161,7 +1195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for row in rows:
                 # This is now a read-only record view. Historical review fields
                 # remain available, but do not hide automatically scored data.
-                fields = ("id", "task_id", "age_band", "is_demo", "run_mode", "created_at", "decision_started_at",
+                fields = ("id", "task_id", "age_band", "education_stage", "student_confirmed", "is_demo", "run_mode", "created_at", "decision_started_at",
                           "ended_at", "reviewed_at", "submission", "decision_choice_id", "execution_choice_id",
                           "flags_json", "review_status", "review_code", "review_reason", "reviewer", "score", "score_note",
                           "literacy_instrument_version", "model_config_id")
@@ -1171,8 +1205,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 task = json.loads(row["task_snapshot_json"])
                 reasons = analysis_reasons(row, active)
                 record.update(record_times(row))
+                formal_reasons = reasons + (["合成展示记录不能纳入真实参与者分析"] if settings.showcase_mode else [])
                 record.update({"in_current_cohort": not reasons, "cohort_exclusion_reasons": reasons,
-                               "analysis_eligible": not reasons, "analysis_exclusion_reasons": reasons,
+                               "analysis_eligible": not formal_reasons, "analysis_exclusion_reasons": formal_reasons,
+                               "is_synthetic": settings.showcase_mode, "record_kind": row["record_kind"],
+                               "showcase_analysis_eligible": settings.showcase_mode and not reasons,
                                "completion_status": "submitted", "group_id": row["group_id"],
                                "literacy_score": row["literacy_score"], "literacy_band": row["literacy_band"],
                                "prompt_version": row["prompt_version"], "prompt_version_blinded": False})
@@ -1259,7 +1296,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record["in_current_cohort"] = not reasons
             record["cohort_exclusion_reasons_json"] = json.dumps(reasons, ensure_ascii=False)
             eligibility_reasons = analysis_reasons(row, active)
+            synthetic = (record.get("is_synthetic") == 1 or row["record_kind"] == "synthetic"
+                         or record.get("data_origin") == "synthetic")
+            record["showcase_analysis_eligible"] = bool(settings.showcase_mode and not eligibility_reasons)
+            if synthetic:
+                eligibility_reasons.append("合成展示记录不能纳入真实参与者分析")
             record["analysis_eligible"] = not eligibility_reasons
+            record["platform_analysis_eligible"] = not eligibility_reasons
+            record["is_synthetic"] = synthetic
+            record["timestamp_is_simulated"] = bool(record.get("timestamp_is_simulated"))
+            record["data_origin"] = "synthetic" if synthetic else record.get("data_origin") or row["record_kind"]
             record["analysis_exclusion_reasons_json"] = json.dumps(eligibility_reasons, ensure_ascii=False)
             messages = _messages(db, row["id"])
             record.update(ai_prompt_counts(messages))

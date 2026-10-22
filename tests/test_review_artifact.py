@@ -114,12 +114,13 @@ def test_export_script_creates_only_private_standalone_files(tmp_path):
     script = Path(__file__).resolve().parents[1] / "scripts" / "export_instrument_review.py"
     proc = subprocess.run([sys.executable, str(script), "--output-dir", str(tmp_path)],
                           capture_output=True, text=True, check=True)
-    report_path = tmp_path / "全部问卷与任务审查.json"
-    html_path = tmp_path / "全部问卷与任务审查.html"
+    report_path = tmp_path / "大学生问卷与任务审查.json"
+    html_path = tmp_path / "大学生问卷与任务审查.html"
     assert report_path.is_file() and html_path.is_file()
     assert (report_path.stat().st_mode & 0o777) == 0o600
     assert (html_path.stat().st_mode & 0o777) == 0o600
     report = json.loads(report_path.read_text())
-    assert report["task_scenario_count"] == 36
-    assert "旧题48；新表单题270；任务案例36" in proc.stdout
-    assert render_review_html(report) == html_path.read_text()
+    assert report["task_scenario_count"] == 4
+    assert "统一问卷1份；独立题目30；统一任务1套；私事实情景4种" in proc.stdout
+    from app.student_review import render_review_html as render_student_review
+    assert render_student_review(report) == html_path.read_text()

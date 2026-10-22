@@ -1,0 +1,10 @@
+# Overlay for an administrator-only real-model trial alongside an existing showcase.
+# Configure STUDY_MODE=pilot and the actual model service in .env first.
+services:
+  app:
+    environment:
+      PREVIEW_API_PREFIX: /preview-api
+      RESEARCHER_PREVIEW_ONLY: "1"
+      MODEL_MAX_TOKENS: "1600"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]

@@ -8,6 +8,8 @@ venv/
 data/
 synthetic-datasets/
 showcase-data/
+university-data/
+university-showcase-data/
 backups/
 output/
 outputs/

@@ -105,7 +105,7 @@ function renderShowcaseNotice() {
   const completed = showcaseTotals?.submitted;
   const unsubmitted = showcaseTotals?.unsubmitted;
   const box = $("admin-mode");
-  const title = typeof count === "number" ? `全部 ${count} 条记录` : "记录概况";
+  const title = typeof count === "number" ? `大学生合成展示 · 共 ${count} 条记录` : "记录概况";
   box.replaceChildren(node("strong", title));
   if (typeof completed === "number" && typeof unsubmitted === "number") {
     box.append(node("span", `已完成 ${completed} 条 · 未完成 ${unsubmitted} 条`, "showcase-counts"));
@@ -116,14 +116,14 @@ function configureAdminEnvironment(info) {
   showcaseMode = info.showcase_mode === true;
   showcaseTotals = info.showcase_totals || null;
   const downloads = $("synthetic-download-section");
-  if (downloads) downloads.hidden = showcaseMode;
+  if (downloads) downloads.hidden = false;
   const comparison = $("showcase-comparison");
   if (comparison) comparison.hidden = !showcaseMode;
   if (!showcaseMode) return;
   renderShowcaseNotice();
   const replacements = {
-    "admin-analysis-note": "任务按预设选项自动计分，当前方案的完成记录自动纳入统计。",
-    "data-export-title": "导出当前环境记录",
+    "admin-analysis-note": "当前为 university-v1 大学生方案；合成展示记录仅用于功能核验，不是实证结果。",
+    "data-export-title": "导出大学生合成展示记录",
     "data-export-description": "记录 CSV/JSON 保留全部记录，包括未完成记录和历史版本。常用列包含记录编号、年龄、分组、信息素养与任务评分、用时及 AI 主动提示、澄清和引导次数。已完成记录 CSV 仅包含当前方案中完成整份信息素养测试并已提交任务的记录，用于统计；当前同一批记录全部完成时，两类导出的人数可以相同。完整对话单独下载，各下载使用同一记录编号。导出范围覆盖全部年龄，不受上方筛选影响。",
     "analysis-export-link": "已完成记录 CSV"
   };
@@ -160,7 +160,7 @@ function renderShowcaseComparison(comparison) {
   const scroller = node("div", "", "table-scroll"); scroller.append(table); box.append(scroller);
   const gap = (value) => typeof value === "number" && Number.isFinite(value) ? `${numberText(value)}分` : "—";
   box.append(node("p", `高、低素养组均分差：无澄清 ${gap(comparison?.gap_standard)} → 有澄清 ${gap(comparison?.gap_adaptive)}。`, "showcase-gap"));
-  box.append(node("p", "汇总全部年龄的完成样本，不受下方年龄筛选影响。均值差＝有澄清－无澄清。", "muted"));
+  box.append(node("p", "汇总18–25岁大学生方案的完成记录，不受下方年龄分层筛选影响。均值差＝有澄清－无澄清。", "muted"));
 }
 
 function renderConditionComparisons(box, data) {
@@ -353,7 +353,7 @@ async function loadPretestAnalysis() {
   box.append(node("p", `信息素养测试 ${data.version} · ${data.item_count} 题 · 完整作答 ${data.n} 份。`));
   if (data.excluded_count) box.append(node("p", `另有${data.excluded_count}份作答因缺题、选项无效或版本不符未进入逐题统计。`, "muted"));
   if (!data.n) return;
-  box.append(node("p", `平均得分 ${numberText(data.mean_percent)} · KR-20 ${numberText(data.kr20, 2)}。内部一致性不能证明效度或跨年龄可比性。`, "muted"));
+  box.append(node("p", `平均得分 ${numberText(data.mean_percent)} · KR-20 ${numberText(data.kr20, 2)}。内部一致性不能单独证明这套大学生问卷的效度。`, "muted"));
   const table = node("table", "", "item-table");
   const head = node("tr");
   for (const title of ["题号", "维度", "答对比例（95%区间）", "校正题总相关", "高低组差值", "不确定作答", "题目与选项分析"]) head.append(node("th", title));
@@ -441,10 +441,15 @@ function renderReviews() {
     const title = node("h3", `记录 ${recordNumber} · ${row.ended_at ? "已完成" : "未完成"}`);
     const mode = { demo: "DEMO", pilot: "PILOT", live: "LIVE" }[row.run_mode] || (row.is_demo ? "DEMO" : "LIVE");
     card.append(title, node("p", `年龄区间 ${row.age_band || "旧版"} · 任务 ${row.task_id}${showcaseMode ? "" : ` · ${mode}`} · 提交 ${beijingTimeText(row.ended_at)}（北京时间）`, "muted"));
-    const analysisEligible = row.analysis_eligible ?? row.in_current_cohort;
-    const cohortLabel = analysisEligible === true ? "当前统计范围"
-      : analysisEligible === false ? "不计入当前统计" : "统计范围未标注";
-    const reasons = row.analysis_exclusion_reasons ?? row.cohort_exclusion_reasons;
+    const isShowcaseRecord = showcaseMode && typeof row.showcase_analysis_eligible === "boolean";
+    const analysisEligible = isShowcaseRecord ? row.showcase_analysis_eligible
+      : row.analysis_eligible ?? row.in_current_cohort;
+    const cohortLabel = isShowcaseRecord
+      ? (analysisEligible ? "展示统计可用 · 合成记录不纳入真实研究分析" : "不计入当前展示统计")
+      : analysisEligible === true ? "当前统计范围"
+        : analysisEligible === false ? "不计入当前统计" : "统计范围未标注";
+    const reasons = isShowcaseRecord ? row.showcase_analysis_exclusion_reasons
+      : row.analysis_exclusion_reasons ?? row.cohort_exclusion_reasons;
     const cohortReasons = Array.isArray(reasons) ? reasons.filter((reason) => typeof reason === "string" && reason) : [];
     card.append(node("p", cohortLabel + (cohortReasons.length ? `：${cohortReasons.join("；")}` : ""), "muted"));
     const prompts = aiPromptCounts(row);
@@ -575,7 +580,7 @@ async function initAdmin() {
       const option = node("option", band.label); option.value = band.id; $(id).append(option);
     }
   }
-  $("admin-age-band").value = "18-24";
+  $("admin-age-band").value = (info.age_bands || []).find((band) => band.id === "18-20")?.id || info.age_bands?.[0]?.id || "";
   await refreshAll();
 }
 initAdmin().catch((error) => { $("admin-error").textContent = error.message; });

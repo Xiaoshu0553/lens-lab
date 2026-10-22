@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.clean_exports import DIALOGUE_COLUMNS, DISPLAY_VALUES, RECORD_COLUMNS, process_alert_details, record_id_map
+from app.clean_exports import DIALOGUE_COLUMNS, DISPLAY_VALUES, RECORD_COLUMNS, chinese_csv, process_alert_details, record_id_map
 from app.db import connect
 from app.main import create_app
 from test_automatic_cohort import completed_fixture
@@ -91,9 +91,10 @@ def test_main_download_schema_is_fixed_ordered_and_excludes_internal_provenance(
     assert all(list(row) == expected_keys for row in records)
     assert len(expected_keys) < 80 and expected_keys[0] == "record_id"
     forbidden = {"id", "session_id", "synthetic_source_json", "task_snapshot_json", "model_config_id", "model_base_url",
-                 "fixture_conversation", "record_kind", "is_synthetic", "messages_json", "model_events_json",
+                 "fixture_conversation", "messages_json", "model_events_json",
                  "review_history_json", "review_status", "simulation_seed", "synthetic_pretest_time_seconds"}
     assert not (forbidden & set(expected_keys))
+    assert {"record_kind", "is_synthetic", "data_origin", "timestamp_is_simulated", "platform_analysis_eligible"} <= set(expected_keys)
     body = json.dumps(records, ensure_ascii=False)
     assert "SYN-" not in body and "2030" not in body and "preserve-me" not in body
     response = get(client, "/api/admin/export?kind=raw&format=csv")
@@ -123,7 +124,7 @@ def test_zero_null_messages_and_chinese_csv_values_remain_unambiguous(clean_clie
     assert csv_records[zero["record_id"]]["方案可行(1是/0否)"] == "0"
     assert csv_records[zero["record_id"]]["AI主动提示次数"] == "0"
     assert csv_records[zero["record_id"]]["AI平均回复耗时(秒)"] == ""
-    assert csv_records[zero["record_id"]]["教育阶段"] == "本科"
+    assert csv_records[zero["record_id"]]["教育阶段"] == "在读本科"
     assert zero["ended_at"] == "2026-10-20T01:00:00+00:00"
     assert zero["ended_at_beijing"] == "2026-10-20T09:00:00+08:00"
     assert archive[ids["second"]]["ended_at"] == "2026-10-20T09:00:00+08:00"
@@ -146,7 +147,7 @@ def test_dialogue_downloads_are_clean_and_retain_order_content_and_cross_table_i
     assert record["messages"][0]["content"] == "请确认报名材料。\n我怕漏掉。"
     assert record["messages"][0]["created_at_beijing"] == "2026-10-20T08:01:00+08:00"
     assert "SYN-" not in response.text and "2030" not in response.text
-    for key in ["synthetic_source_json", "fixture_conversation", "task_snapshot_json", "model_config_id", "record_kind", "id", "session_id"]:
+    for key in ["synthetic_source_json", "fixture_conversation", "task_snapshot_json", "model_config_id", "id", "session_id"]:
         assert key not in record
     csv_response = get(client, "/api/admin/dialogue-export?format=csv")
     reader = csv.DictReader(io.StringIO(csv_response.text.lstrip("\ufeff")))
@@ -302,4 +303,9 @@ def test_education_display_labels_cover_every_current_form_code():
     html = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
     select = re.search(r'<select id="education-stage">(.*?)</select>', html).group(1)
     form_labels = dict(re.findall(r'<option value="([^"]+)">([^<]+)</option>', select))
-    assert DISPLAY_VALUES["education_stage"] == form_labels
+    from app.student_materials import EDUCATION_STAGES
+    assert EDUCATION_STAGES == form_labels
+    assert all(DISPLAY_VALUES["education_stage"][key] == value.removeprefix("在读")
+               for key, value in form_labels.items())
+    content = chinese_csv([{"education_stage": "college", "student_confirmed": 1}], RECORD_COLUMNS)
+    assert next(csv.DictReader(io.StringIO(content.lstrip("\ufeff"))))["教育阶段"] == "在读专科"

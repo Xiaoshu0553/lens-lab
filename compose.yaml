@@ -4,8 +4,10 @@ services:
       context: .
       network: host
     env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/lens.sqlite3
     volumes:
-      - ./data:/app/data
+      - ./university-data:/app/data
       - ./synthetic-datasets:/app/synthetic-datasets:ro
     ports:
       - "127.0.0.1:8000:8000"

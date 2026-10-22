@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.age_forms import form_for
+from app.student_materials import form_for
 from app.config import Settings
 from app.db import connect
 from app.main import create_app
@@ -28,8 +28,8 @@ def config(tmp_path, **overrides):
 
 
 def payload(**overrides):
-    version, items = form_for("18-24")
-    return dict(consent=True, age_band="18-24", education_stage="bachelor", topic_familiarity=3,
+    version, items = form_for("18-20")
+    return dict(consent=True, age_band="18-20", education_stage="bachelor", topic_familiarity=3, student_confirmed=True,
                 pretest_version=version, pretest_answers={item["id"]: item["correct"] for item in items}) | overrides
 
 
@@ -236,8 +236,14 @@ def test_unicode_access_code_does_not_raise_type_error(tmp_path):
 
 
 def test_csv_export_neutralizes_spreadsheet_formulas_and_preserves_json(tmp_path):
-    client = TestClient(create_app(config(tmp_path)))
-    assert client.post("/api/start", json=payload(education_stage="=1+1")).status_code == 200
+    cfg = config(tmp_path)
+    client = TestClient(create_app(cfg))
+    assert client.post("/api/start", json=payload(education_stage="=1+1")).status_code == 422
+    sid = client.post("/api/start", json=payload()).json()["session_id"]
+    # Imported historical text still requires escaping even though new intake
+    # cannot accept arbitrary education values.
+    with connect(cfg.database_path) as db:
+        db.execute("UPDATE sessions SET education_stage='=1+1' WHERE id=?", (sid,))
     raw_json = client.get("/api/admin/export?format=json", headers=auth()).json()[0]
     assert raw_json["education_stage"] == "=1+1"
     raw_csv = client.get("/api/admin/export?format=csv", headers=auth()).text.lstrip("\ufeff")

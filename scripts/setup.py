@@ -19,7 +19,7 @@ def main() -> None:
         "# 本地实验配置；不要上传公开仓库\n"
         "STUDY_DOMAIN=\n"
         "STUDY_MODE=demo\n"
-        "DATABASE_PATH=./data/lens.sqlite3\n"
+        "DATABASE_PATH=./university-data/lens.sqlite3\n"
         f"ADMIN_PASSWORD={password}\n"
         f"ASSIGNMENT_SEED={seed}\n"
         "PARTICIPANT_ACCESS_CODE=\n"
@@ -30,7 +30,7 @@ def main() -> None:
         "MODEL_NAME=deepseek-flash\n"
         "MODEL_TEMPERATURE=0\n"
         "MODEL_THINKING=disabled\n"
-        "MODEL_MAX_TOKENS=800\n",
+        "MODEL_MAX_TOKENS=1600\n",
         encoding="utf-8",
     )
     try:

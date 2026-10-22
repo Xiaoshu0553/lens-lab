@@ -9,20 +9,20 @@
 <body>
   <header class="topbar"><div class="wrap topbar-inner"><strong>LENS Lab</strong><span>信息素养与 AI 辅助实验</span><button id="text-size-button" class="text-size-button" type="button" aria-pressed="false">大字</button><a href="/admin">管理员</a></div></header>
   <main class="wrap">
-    <section class="hero"><p class="eyebrow">研究参与者界面</p><h1>用 AI 完成一项信息任务</h1><p>先完成信息判断题，再与 AI 查证资料，最后独立选择行动方案。</p></section>
+    <section class="hero"><p class="eyebrow">大学生参与者界面</p><h1>大学生信息判断与 AI 辅助任务</h1><p>先完成信息判断题，再与 AI 查证资料，最后独立选择行动方案。</p></section>
     <div id="mode-banner" class="notice" hidden></div>
     <div id="resume-notice" class="notice" hidden><p id="resume-copy"></p><div class="actions"><button id="resume-button" type="button" class="quiet">重新连接</button><button id="restart-button" type="button" class="quiet" hidden>开始新会话</button></div></div>
     <section id="consent-panel" class="card">
       <h2>参加说明与同意</h2>
-      <p>研究关注信息素养与 AI 辅助方式对决策质量的影响。请填写基本信息，完成 30 道信息判断题。</p>
-      <details class="consent-details"><summary>数据记录与退出方式</summary><p>系统记录年龄区间、教育阶段、熟悉程度、问卷答案与得分、随机会话编号、实验分组、对话、用时、最终提交及自动评分结果。使用远程 AI 时，对话会发送至模型服务。</p><p>无需填写姓名、学号或电话，请勿输入真实个人隐私。你可以随时退出并删除本次会话。只有同意后才会创建研究记录。</p></details>
+      <p>研究关注信息素养与 AI 辅助方式对决策质量的影响。本研究面向18–25岁在读专科、本科学生。请填写基本信息，完成三个年龄区间共用的30道信息判断题。</p>
+      <details class="consent-details"><summary>数据记录与退出方式</summary><p>系统记录年龄区间、在读学段、在读确认、熟悉程度、问卷答案与得分、随机会话编号、实验分组、对话、用时、最终提交及自动评分结果。使用远程 AI 时，对话会发送至模型服务。</p><p>无需填写姓名、学号或电话，请勿输入真实个人隐私。你可以随时退出并删除本次会话。只有同意后才会创建研究记录。</p></details>
       <div class="intake-grid">
         <label>年龄区间<select id="age-band"><option value="">请选择</option></select></label>
-        <label>目前或最高教育阶段<select id="education-stage"><option value="">请选择</option><option value="primary">小学</option><option value="junior">初中</option><option value="senior">高中或中职</option><option value="college">专科</option><option value="bachelor">本科</option><option value="graduate">研究生及以上</option><option value="other">其他或不便说明</option></select></label>
+        <label>目前在读学段<select id="education-stage"><option value="">请选择</option><option value="college">在读专科</option><option value="bachelor">在读本科</option></select></label>
         <label>你对查找并核对通知、规则等信息有多熟悉？<select id="topic-familiarity"><option value="">请选择</option><option value="1">1 · 完全不熟悉</option><option value="2">2 · 不太熟悉</option><option value="3">3 · 一般</option><option value="4">4 · 比较熟悉</option><option value="5">5 · 很熟悉</option></select></label>
       </div>
-      <div id="minor-consent" class="guidance" hidden><strong>未成年人参与</strong><p>参加前需由监护人了解本页的数据记录和远程模型说明，并在线下完成研究者规定的同意流程。参与者本人也应愿意参加。</p><p id="under14-policy" hidden>12–14 岁组还需阅读<a id="under14-policy-link" target="_blank" rel="noopener noreferrer">未满十四周岁个人信息专门处理规则</a>。</p><label class="check"><input type="checkbox" id="guardian-consent">监护人已了解研究并同意我参加</label><label class="check"><input type="checkbox" id="participant-assent">我本人愿意参加</label><label>监护人同意后获得的专用邀请码<input id="minor-access-code" type="password" autocomplete="off"></label></div>
-      <div class="pretest-heading"><h3 id="pretest-heading" tabindex="-1">信息判断题</h3><span id="pretest-progress" class="pill" role="status">请选择年龄区间</span></div><p class="muted">每题选一项，拿不准可选“我暂时不会选”。每页 6 题，可随时停下来休息；本标签页会暂存作答。</p>
+      <label class="check"><input type="checkbox" id="student-confirmed">我确认目前为在读专科或本科学生，年龄为18–25岁</label>
+      <div class="pretest-heading"><h3 id="pretest-heading" tabindex="-1">信息判断题</h3><span id="pretest-progress" class="pill" role="status">请选择年龄区间</span></div><p class="muted">三个年龄区间共用同一套题，切换区间会保留当前作答。每题选一项，拿不准可选“我暂时不会选”。每页 6 题，可随时停下来休息；本标签页会暂存作答。</p>
       <progress id="pretest-meter" max="30" value="0" aria-label="问卷完成进度"></progress>
       <p id="pretest-loading" class="muted">选择年龄区间后载入问卷。</p>
       <div id="pretest-items"></div>
@@ -46,7 +46,7 @@
         <article class="card chat-card">
           <div class="card-heading"><div><p class="eyebrow">AI 对话</p><h2>查证任务资料</h2></div><div class="chat-meta"><span id="turn-counter" class="pill"></span><span id="time-counter" class="muted"></span></div></div>
           <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-relevant="additions text"></div>
-          <form id="chat-form" class="chat-form"><label for="message-input" class="sr-only">输入问题</label><textarea id="message-input" maxlength="4000" rows="3" placeholder="输入你想核查的具体问题"></textarea><button id="send-button" type="submit" class="primary">发送</button></form>
+          <form id="chat-form" class="chat-form"><label for="message-input" class="sr-only">输入问题，Enter 发送，Shift+Enter 换行</label><textarea id="message-input" maxlength="4000" rows="3" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea><button id="send-button" type="submit" class="primary">发送</button></form>
           <p id="chat-status" class="muted" aria-live="polite"></p>
           <p id="chat-error" class="error" role="alert"></p>
           <button id="sync-button" type="button" class="quiet" hidden>重新同步对话</button>
@@ -67,6 +67,6 @@
     <section id="done-panel" class="card" hidden><h2>任务已提交</h2><p id="done-copy"></p><p>感谢参与。</p><div class="actions"><button id="done-withdraw" class="quiet">删除本次数据</button><button id="new-pilot-button" class="quiet" hidden>返回测试</button></div></section>
     <details id="session-history" class="session-history" hidden><summary>本浏览器的其他实验记录</summary><div id="session-history-list"></div></details>
   </main>
-  <script src="/static/app.js?v=objective-20261021" defer></script>
+  <script src="/static/app.js?v=university-v1-20261022" defer></script>
 </body>
 </html>

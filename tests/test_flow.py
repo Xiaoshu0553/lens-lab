@@ -14,24 +14,26 @@ import app.main as main_module
 from app.config import Settings
 from app.main import create_app
 from app.db import connect
-from app.age_forms import AGE_BANDS, ANCHOR_ITEMS, form_for, score_form
-from app.age_tasks import task_for
-from app.model import LiveProvider, PROMPT_ONLY_VERSION, prompt_only_system_prompt
+from app.student_materials import AGE_BANDS, ITEMS as STUDENT_ITEMS, form_for, score_form
+ANCHOR_ITEMS = [item for item in STUDENT_ITEMS if item["anchor"]]
+from app.student_materials import task_for
+from app.model import (ANSWER_PROMPT_VERSION, LiveProvider, PROMPT_ONLY_VERSION,
+                       answer_system_prompt, prompt_only_system_prompt)
 from app.seed import PILOT_TASK, PILOT_TASK_V4, PILOT_TASK_V5
 
 
-VERSION, ITEMS = form_for("18-24")
+VERSION, ITEMS = form_for("18-20")
 ANSWERS = {item["id"]: item["correct"] for item in ITEMS}
-AGE_TASK_18 = task_for("18-24")
+AGE_TASK_18 = task_for("18-20")
 
 
-def start_payload(answers=None, age_band="18-24"):
+def start_payload(answers=None, age_band="18-20"):
     version, items = form_for(age_band)
     return {"consent": True, "age_band": age_band, "education_stage": "bachelor",
-            "topic_familiarity": 3, "participant_assent": True, "guardian_consent": True,
+            "topic_familiarity": 3, "student_confirmed": True,
             "pretest_version": version,
             "pretest_answers": ({item["id"]: item["correct"] for item in items}
-                                if answers is None and age_band != "18-24" else ANSWERS if answers is None else answers)}
+                                if answers is None and age_band != "18-20" else ANSWERS if answers is None else answers)}
 
 
 def start(client, answers=None):
@@ -109,7 +111,9 @@ def task_clock(monkeypatch):
 
 @pytest.mark.parametrize("mode", ["pilot", "live"])
 def test_task_time_and_choice_score_survive_refresh_and_export(tmp_path, task_clock, mode):
-    client = TestClient(create_app(settings(tmp_path, mode)))
+    app = create_app(settings(tmp_path, mode))
+    app.state.provider = FakePilotProvider()
+    client = TestClient(app)
     if mode == "live":
         assert client.post("/api/admin/tasks", headers=auth(), json=AGE_TASK_18).status_code == 200
     sid = start(client).json()["session_id"]
@@ -217,14 +221,14 @@ def test_demo_clarification_review_and_exports(tmp_path):
     assert start(client, {"s01": 0}).status_code == 422
     assert start(client, {**ANSWERS, "s01": 4}).status_code == 422
     assert client.post("/api/start", json={**start_payload(), "pretest_version": "old"}).status_code == 409
-    pretest = client.get("/api/pretest?age_band=18-24").json()
+    pretest = client.get("/api/pretest?age_band=18-20").json()
     assert pretest["item_count"] == 30
     assert "correct" not in json.dumps(pretest)
     starts = start_two(client)
     adaptive = next(s for s in starts if s["interaction_condition"] == "adaptive")
     sid = adaptive["session_id"]
     answer = client.post(f"/api/session/{sid}/message", json={"content": "我能报名这个课程吗？"}).json()
-    assert answer["action"] == "module_clarification"
+    assert answer["action"] == "prompt_clarification"
     assert "每周" in answer["content"]
     answer2 = client.post(f"/api/session/{sid}/message", json={"content": "我每周能参加三次。现行的参加频率条件是什么？"}).json()
     assert answer2["action"] == "evidence"
@@ -278,23 +282,29 @@ class FakeLiveProvider:
 
     async def complete(self, messages, *, temperature=None):
         self.calls.append(messages)
-        if messages[0]["content"].startswith("你只判断是否必须先向用户澄清"):
-            return json.dumps({"need_clarification": True, "slot_key": "funding", "reason": "资格取决于资助状态"}, ensure_ascii=False)
-        return json.dumps({"card_id": "MATERIALS", "clarify_slot": None}, ensure_ascii=False)
+        latest = messages[-1]["content"]
+        if "材料" in latest:
+            return "申请材料是申请表和成绩单。"
+        if "额外的澄清策略（主动澄清组）" in messages[0]["content"]:
+            return "【澄清提问】申请人曾领过同类资助吗？"
+        return "申请人是本校二年级学生；如果未领过同类资助，就可以申请学习支持金。"
 
 
 class FakePilotProvider(FakeLiveProvider):
     async def complete(self, messages, *, temperature=None):
         self.calls.append(messages)
-        if messages[0]["content"].startswith("你只判断是否必须先向用户澄清"):
-            return json.dumps({"need_clarification": True, "slot_key": "weekly_availability", "reason": "资格取决于每周可参加次数"}, ensure_ascii=False)
-        if messages[0]["content"].startswith("你是实验平台的资料路由器"):
-            question = messages[0]["content"].split("用户本轮问题：")[-1]
-            card = "C_TIME" if "截止" in question else ("B_SCOPE" if "现行" in question else None)
-            return json.dumps({"status": "matched" if card else "unclear",
-                               "card_id": card,
-                               "clarify_slot": None})
-        return "依据资料包，需要核对每周参加次数以及现行文件。"
+        latest = messages[-1]["content"]
+        if latest in {"你好", "您好"}:
+            return "你好，我可以根据任务资料回答你的问题。"
+        if "截止" in latest:
+            return "依据 C_TIME 更正公告，本次截止时间为11月18日17:00，到活动服务点提交，邮件不受理。"
+        if "现行" in latest:
+            return "《2026 年秋季青年社区图像活动报名办法》适用于本次2026年秋季报名，2025年旧指南不适用。"
+        if "办理要求" in latest:
+            return "资格条件包括身份与年龄；按情况选择登记类别和参加安排，11月18日17:00前到活动服务点交报名表和参加计划。"
+        if "额外的澄清策略（主动澄清组）" in messages[0]["content"]:
+            return "【澄清提问】" + AGE_TASK_18["slots"][0]["question"]
+        return "身份和年龄符合基本条件；登记类别取决于既往名额，参加安排取决于每周能到场次数。"
 
 
 def test_live_uses_real_provider_path_and_automatic_completed_export(tmp_path):
@@ -304,7 +314,7 @@ def test_live_uses_real_provider_path_and_automatic_completed_export(tmp_path):
     client = TestClient(app)
     assert client.get("/api/admin/summary").status_code == 401
     task = {
-        "age_band": "18-24",
+        "age_band": "18-20",
         "title": "模拟资助资格判断", "instructions": "请判断申请资格并写出完整依据。",
         "shared_context": "申请人是本校二年级学生。", "participant_facts": "你知道申请人未领过同类资助。",
         "reference_text": "这是虚构制度。二年级学生且未领过同类资助，可以申请学习支持金。申请材料为申请表和成绩单。",
@@ -325,12 +335,17 @@ def test_live_uses_real_provider_path_and_automatic_completed_export(tmp_path):
     standard = next(s for s in starts if s["interaction_condition"] == "standard")
     a = client.post(f"/api/session/{adaptive['session_id']}/message", json={"content": "我能申请吗？"}).json()
     s = client.post(f"/api/session/{standard['session_id']}/message", json={"content": "我能申请吗？"}).json()
-    assert a["action"] == "module_clarification"
-    assert s["action"] == "task_guidance" and "最终决策由你" in s["content"]
-    assert any(call[0]["content"].startswith("你只判断") for call in provider.calls)
+    assert a["action"] == "prompt_clarification" and a["content"] == "申请人曾领过同类资助吗？"
+    assert s["action"] == "answer" and "如果未领过同类资助" in s["content"]
+    assert len(provider.calls) == 2
+    assert provider.calls[0][0]["content"] == prompt_only_system_prompt(task)
+    assert provider.calls[1][0]["content"] == answer_system_prompt(task)
+    assert all(call[-1] == {"role": "user", "content": "我能申请吗？"} for call in provider.calls)
+    assert all(task["participant_facts"] not in call[0]["content"] and task["rubric"] not in call[0]["content"]
+               for call in provider.calls)
     sid = standard["session_id"]
     evidence = client.post(f"/api/session/{sid}/message", json={"content": "材料有哪些？"}).json()
-    assert evidence["action"] == "evidence" and "申请表和成绩单" in evidence["content"]
+    assert evidence["action"] == "answer" and "申请表和成绩单" in evidence["content"]
     assert client.post(f"/api/session/{sid}/decision").status_code == 200
     decisions = client.post(f"/api/session/{sid}/decision").json()
     assert client.post(f"/api/session/{sid}/submit", json={"submission": ""}).status_code == 422
@@ -343,7 +358,7 @@ def test_live_uses_real_provider_path_and_automatic_completed_export(tmp_path):
     assert analysis[0]["completion_score_pct"] == 100
     assert analysis[0]["user_turns"] == 2
     assert analysis[0]["source_searches"] == 0 and analysis[0]["source_opens"] == 0
-    assert analysis[0]["evidence_reveals"] == 1 and analysis[0]["distinct_evidence_cards"] == 1
+    assert analysis[0]["evidence_reveals"] == 0 and analysis[0]["distinct_evidence_cards"] == 0
     assert analysis[0]["mean_reply_seconds"] is not None
     summary = client.get("/api/admin/summary", headers=auth()).json()
     score_bins = summary["score_distribution"]
@@ -368,8 +383,8 @@ def test_pilot_calls_model_and_exports_its_own_completed_cohort(tmp_path):
     adaptive = next(s for s in starts if s["interaction_condition"] == "adaptive")
     sid = adaptive["session_id"]
     answer = client.post(f"/api/session/{sid}/message", json={"content": "我能报名吗？"}).json()
-    assert answer["action"] == "module_clarification"
-    assert provider.calls  # 预测试实际经过模型判定，而非演示规则
+    assert answer["action"] == "prompt_clarification"
+    assert len(provider.calls) == 1 and provider.calls[0][-1]["content"] == "我能报名吗？"
     assert client.post(f"/api/session/{sid}/decision").status_code == 409
     client.post(f"/api/session/{sid}/message", json={"content": "你好"})
     decisions = client.post(f"/api/session/{sid}/decision").json()
@@ -398,7 +413,7 @@ def test_literacy_stratification_and_legacy_separation(tmp_path):
         assert {r["literacy_percent"] for r in rows} == {0.0, 100.0}
         assert {r["literacy_band"] for r in rows} == {"000-010", "090-100"}
         assert {r["expression_condition"] for r in rows} == {"natural"}
-        assert all(r["design_version"] == "literacy-age-v5" and r["literacy_answers_json"] for r in rows)
+        assert all(r["design_version"] == "university-v1" and r["literacy_answers_json"] for r in rows)
         db.execute("UPDATE sessions SET design_version='style-v1',review_status='valid',is_demo=0 WHERE id=?", (high[0]["session_id"],))
         db.execute("UPDATE sessions SET ended_at=created_at WHERE id=?", (high[0]["session_id"],))
     assert all(r["id"] != record_id_for(client, high[0]["session_id"]) for r in client.get("/api/admin/review-queue", headers=auth()).json())
@@ -407,11 +422,13 @@ def test_literacy_stratification_and_legacy_separation(tmp_path):
 
 
 def test_percent_score_and_pilot_item_analysis(tmp_path):
-    assert score_form("18-24", ANSWERS, 10)[:3] == (30, 100.0, "090-100")
+    assert score_form("18-20", ANSWERS, 10)[:3] == (30, 100.0, "090-100")
     wrong = {key: (value + 1) % 3 for key, value in ANSWERS.items()}
-    assert score_form("18-24", wrong, 10)[:3] == (0, 0.0, "000-010")
-    assert score_form("18-24", ANSWERS, 20)[2] == "080-100"
-    client = TestClient(create_app(settings(tmp_path, "pilot")))
+    assert score_form("18-20", wrong, 10)[:3] == (0, 0.0, "000-010")
+    assert score_form("18-20", ANSWERS, 20)[2] == "080-100"
+    app = create_app(settings(tmp_path, "pilot"))
+    app.state.provider = FakePilotProvider()
+    client = TestClient(app)
     for answers in [ANSWERS, ANSWERS, wrong, wrong]:
         started = start(client, answers)
         assert started.status_code == 200
@@ -427,7 +444,7 @@ def test_percent_score_and_pilot_item_analysis(tmp_path):
     assert all(item["p_correct"] == 0.5 and item["corrected_item_total_r"] == 1.0 for item in report["items"])
 
 
-def test_pilot_task_uses_chat_only_evidence_and_machine_scoring(tmp_path):
+def test_pilot_task_answers_directly_without_source_browser_and_keeps_machine_scoring(tmp_path):
     app = create_app(settings(tmp_path, "pilot"))
     app.state.provider = FakePilotProvider()
     client = TestClient(app)
@@ -442,10 +459,17 @@ def test_pilot_task_uses_chat_only_evidence_and_machine_scoring(tmp_path):
     broad = client.post(f"/api/session/{sid}/message", json={"content": "直接告诉我能否报名"}).json()
     assert broad["action"] != "evidence" and "每周可参加 3 次" not in broad["content"]
     found = client.post(f"/api/session/{sid}/message", json={"content": "最新截止时间是什么？"}).json()
-    assert found["action"] == "evidence" and "11月18日17:00" in found["content"]
+    assert found["action"] == "answer" and "11月18日17:00" in found["content"]
     raw = client.get("/api/admin/archive-export?kind=raw&format=json", headers=auth()).json()
     events = next(row for row in raw if row["id"] == sid)["model_events_json"]
-    assert "evidence_route" in events and "evidence_reveal" in events
+    assert "evidence_route" not in events and "evidence_reveal" not in events
+    assert "dialogue_prompt" in events and "reply_latency" in events
+    assert len(app.state.provider.calls) == 2
+    assert app.state.provider.calls[-1][1:] == [
+        {"role": "user", "content": "直接告诉我能否报名"},
+        {"role": "assistant", "content": broad["content"]},
+        {"role": "user", "content": "最新截止时间是什么？"},
+    ]
     summary = client.get("/api/admin/summary", headers=auth()).json()
     assert summary["literacy_distribution"] == []
     assert sum(row["sessions"] for row in summary["score_distribution"]) == 0
@@ -467,11 +491,11 @@ def test_new_task_isolated_from_previous_task_dashboard(tmp_path):
     previous = start(client).json()
     body = {key: PILOT_TASK_V4[key] for key in
             ["title", "instructions", "shared_context", "participant_facts", "reference_text", "rubric", "slots", "keywords", "evidence_cards", "decision_options"]}
-    body["age_band"] = "18-24"
+    body["age_band"] = "18-20"
     body["title"] = "预测试任务：第二版本资料包"
     new_id = client.post("/api/admin/tasks", headers=auth(), json=body).json()["id"]
     tasks = client.get("/api/admin/tasks", headers=auth()).json()
-    assert {task["id"] for task in tasks if task["active"] and task["age_band"] == "18-24"} == {new_id}
+    assert {task["id"] for task in tasks if task["active"] and task["age_band"] == "18-20"} == {new_id}
     summary = client.get("/api/admin/summary", headers=auth()).json()
     assert summary["active_task_id"] == new_id and summary["literacy_distribution"] == []
     assert start(client).json()["task"]["id"] == new_id
@@ -489,7 +513,7 @@ def test_participant_access_code_and_deepseek_payload(tmp_path):
     payload = LiveProvider(cfg).request_payload([{"role": "user", "content": "你好"}])
     assert payload["model"] == "deepseek-flash"
     assert payload["thinking"] == {"type": "disabled"}
-    assert payload["max_tokens"] == 800
+    assert payload["max_tokens"] == 1600
     prompt = prompt_only_system_prompt(PILOT_TASK)
     assert "只是问候" in prompt and "已经明确给出的事实绝不重复追问" in prompt
 
@@ -500,8 +524,8 @@ def test_nearby_percent_scores_share_an_assignment_interval(tmp_path):
     keys = list(ANSWERS)
     three_correct = {**wrong, **{key: ANSWERS[key] for key in keys[:3]}}
     four_correct = {**three_correct, keys[3]: ANSWERS[keys[3]]}
-    assert score_form("18-24", three_correct)[:3] == (3, 10.0, "010-020")
-    assert score_form("18-24", four_correct)[:3] == (4, 13.33, "010-020")
+    assert score_form("18-20", three_correct)[:3] == (3, 10.0, "010-020")
+    assert score_form("18-20", four_correct)[:3] == (4, 13.33, "010-020")
     assigned = [start(client, answers).json() for answers in
                 [three_correct, four_correct, three_correct, four_correct]]
     assert sorted(row["group_id"] for row in assigned) == ["A", "A", "S", "S"]
@@ -512,15 +536,8 @@ def test_nearby_percent_scores_share_an_assignment_interval(tmp_path):
     assert {(row["literacy_band"], row["literacy_band_width"]) for row in rows} == {("010-020", 10)}
 
 
-class FakePromptProvider:
-    def __init__(self):
-        self.calls = []
-
-    async def complete(self, messages, *, temperature=None):
-        self.calls.append(messages)
-        if "若用户请求个案最终判断" in messages[0]["content"]:
-            return json.dumps({"card_id": "B_SCHEDULE", "clarify_slot": "weekly_availability"})
-        return json.dumps({"card_id": "C_TIME", "clarify_slot": None})
+class FakePromptProvider(FakePilotProvider):
+    pass
 
 
 def test_prompt_only_strategy_uses_same_model_with_extra_instruction(tmp_path):
@@ -536,18 +553,23 @@ def test_prompt_only_strategy_uses_same_model_with_extra_instruction(tmp_path):
     a = client.post(f"/api/session/{adaptive['session_id']}/message", json={"content": "我能申请吗？"}).json()
     s = client.post(f"/api/session/{standard['session_id']}/message", json={"content": "我能申请吗？"}).json()
     assert a["action"] == "prompt_clarification" and a["content"] == AGE_TASK_18["slots"][0]["question"]
-    assert s["action"] == "task_guidance" and "最终决策由你" in s["content"]
+    assert s["action"] == "answer" and "取决于每周能到场次数" in s["content"]
     assert len(provider.calls) == 2
-    assert "若用户请求个案最终判断" in provider.calls[0][0]["content"]
-    assert "本组不主动追问" in provider.calls[1][0]["content"]
+    adaptive_prompt, standard_prompt = (call[0]["content"] for call in provider.calls)
+    assert adaptive_prompt.startswith(standard_prompt + "\n额外的澄清策略（主动澄清组）")
+    assert "额外的澄清策略（主动澄清组）" not in standard_prompt
+    assert provider.calls[0][1:] == provider.calls[1][1:] == [{"role": "user", "content": "我能申请吗？"}]
     with connect(cfg.database_path) as db:
         rows = list(db.execute("SELECT group_id,clarification_strategy,prompt_version FROM sessions"))
         assert {r["clarification_strategy"] for r in rows} == {"prompt"}
-        assert next(r for r in rows if r["group_id"] == "A")["prompt_version"].endswith(PROMPT_ONLY_VERSION)
+        assert next(r for r in rows if r["group_id"] == "A")["prompt_version"] == ANSWER_PROMPT_VERSION + "+" + PROMPT_ONLY_VERSION
+        assert next(r for r in rows if r["group_id"] == "S")["prompt_version"] == ANSWER_PROMPT_VERSION
 
 
 def test_choice_is_stable_hidden_until_decision_and_scored_on_submit(tmp_path):
-    client = TestClient(create_app(settings(tmp_path, "pilot")))
+    app = create_app(settings(tmp_path, "pilot"))
+    app.state.provider = FakePilotProvider()
+    client = TestClient(app)
     started = start(client).json()
     sid = started["session_id"]
     assert started["task"]["decision_options"] == []
@@ -576,7 +598,7 @@ def test_choice_is_stable_hidden_until_decision_and_scored_on_submit(tmp_path):
     row = next(item for item in queue if item["id"] == record_id_for(client, sid))
     assert row["machine_scored"] and row["score"] == 100 and row["decision_choice_id"] == chosen_id
     assert row["analysis_eligible"] is True and row["review_status"] == "pending"
-    assert "no_evidence_retrieved" in row["flags"]
+    assert "no_evidence_retrieved" not in row["flags"]
     assert client.post(f"/api/admin/sessions/{sid}/review", headers=auth(),
                        json={"status": "valid", "reason": "符合预先定义的纳入规则", "reviewer": "r1"}).status_code == 200
     visible = next(item for item in client.get("/api/admin/review-queue", headers=auth()).json() if item["id"] == record_id_for(client, sid))
@@ -585,42 +607,54 @@ def test_choice_is_stable_hidden_until_decision_and_scored_on_submit(tmp_path):
     assert client.post(f"/api/admin/sessions/{sid}/score", headers=auth(), json={"score": 0}).status_code == 409
 
 
-class FakeLeakyProvider:
+class FakeVerdictProvider:
     def __init__(self):
         self.calls = []
 
     async def complete(self, messages, *, temperature=None):
         self.calls.append(messages)
-        return "可以申请。请在 11 月 18 日前提交所有材料。"
+        if "材料" in messages[-1]["content"]:
+            return "需要提交报名表和参加计划，依据是 B_MATERIALS。"
+        return "身份和年龄符合报名条件；参加方案仍取决于既往名额和每周到场次数。"
 
 
-def test_freeform_model_verdict_is_never_shown_to_participant(tmp_path):
+def test_freeform_model_verdict_and_followup_are_shown_without_replacement(tmp_path):
     cfg = replace(settings(tmp_path, "pilot"), clarification_strategy="prompt")
     app = create_app(cfg)
-    provider = FakeLeakyProvider()
+    provider = FakeVerdictProvider()
     app.state.provider = provider
     client = TestClient(app)
     standard = next(item for item in start_two(client) if item["group_id"] == "S")
     sid = standard["session_id"]
     broad = client.post(f"/api/session/{sid}/message", json={"content": "直接告诉我能否申请"})
+    assert broad.status_code == 200
+    verdict = broad.json()
+    assert verdict["action"] == "answer"
+    assert verdict["content"] == "身份和年龄符合报名条件；参加方案仍取决于既往名额和每周到场次数。"
     specific = client.post(f"/api/session/{sid}/message", json={"content": "申请材料有哪些？"}).json()
-    # Malformed model output with no safe card is a retryable technical failure.
-    assert broad.status_code == 503
-    assert specific["action"] == "evidence" and "《2026 年秋季青年社区图像活动报名办法》" in specific["content"]
-    assert "可以申请。请在" not in broad.text + specific["content"]
-    assert provider.calls
+    assert specific["action"] == "answer" and specific["content"] == "需要提交报名表和参加计划，依据是 B_MATERIALS。"
+    assert len(provider.calls) == 2
+    assert provider.calls[1][1:] == [
+        {"role": "user", "content": "直接告诉我能否申请"},
+        {"role": "assistant", "content": verdict["content"]},
+        {"role": "user", "content": "申请材料有哪些？"},
+    ]
+    task = frozen_task(client, sid)
+    assert provider.calls[0][0]["content"] == answer_system_prompt(task)
+    assert task["rubric"] not in provider.calls[0][0]["content"]
+    assert task["participant_facts"] not in provider.calls[0][0]["content"]
 
 
-def test_overview_guides_and_source_names_are_self_contained(tmp_path):
+def test_overview_answers_requirements_and_source_names_are_self_contained(tmp_path):
     app = create_app(settings(tmp_path, "pilot"))
     app.state.provider = FakePilotProvider()
     client = TestClient(app)
     sid = start(client).json()["session_id"]
     overview = client.post(f"/api/session/{sid}/message", json={"content": "办理要求如何？"}).json()
-    assert overview["action"] == "task_guidance"
+    assert overview["action"] == "answer"
     assert "资格条件" in overview["content"] and "文件 A" not in overview["content"]
     scope = client.post(f"/api/session/{sid}/message", json={"content": "现行办法适用于哪个批次？"}).json()
-    assert scope["action"] == "evidence"
+    assert scope["action"] == "answer"
     assert "《2026 年秋季青年社区图像活动报名办法》" in scope["content"]
     assert "文件 A" not in scope["content"] and "文件 B" not in scope["content"]
     assert all("文件 A" not in card["body"] and "文件 B" not in card["body"]
@@ -633,50 +667,60 @@ def test_age_strata_have_parallel_forms_tasks_and_independent_assignment(tmp_pat
     assert client.get("/api/pretest?age_band=unknown").status_code == 422
     forms = {band: client.get("/api/pretest", params={"age_band": band}).json()
              for band in AGE_BANDS}
-    assert len({form["version"] for form in forms.values()}) == 9
+    assert len({form["version"] for form in forms.values()}) == 1
+    assert all(form["items"] == forms["18-20"]["items"] for form in forms.values())
     assert all(form["item_count"] == 30 and form["anchor_count"] == len(ANCHOR_ITEMS) for form in forms.values())
     assert all("correct" not in json.dumps(form) for form in forms.values())
     anchors = [{item["id"]: item for item in form["items"] if item["id"] in
                 {anchor["id"] for anchor in ANCHOR_ITEMS}} for form in forms.values()]
     assert all(anchor == anchors[0] for anchor in anchors)
     starts = {}
-    for band in ["18-24", "65-74"]:
+    for band in ["18-20", "24-25"]:
         starts[band] = [client.post("/api/start", json=start_payload(age_band=band)).json()
                         for _ in range(2)]
         assert {row["group_id"] for row in starts[band]} == {"S", "A"}
         assert all(row["task"]["id"] == starts[band][0]["task"]["id"] for row in starts[band])
-    assert starts["18-24"][0]["task"]["id"] != starts["65-74"][0]["task"]["id"]
-    adult_summary = client.get("/api/admin/summary?age_band=18-24", headers=auth()).json()
-    older_summary = client.get("/api/admin/summary?age_band=65-74", headers=auth()).json()
+    assert starts["18-20"][0]["task"]["id"] != starts["24-25"][0]["task"]["id"]
+    adult_summary = client.get("/api/admin/summary?age_band=18-20", headers=auth()).json()
+    older_summary = client.get("/api/admin/summary?age_band=24-25", headers=auth()).json()
     assert sum(row["sessions"] for row in adult_summary["groups"]) == 2
     assert sum(row["sessions"] for row in older_summary["groups"]) == 2
     assert adult_summary["active_task_id"] != older_summary["active_task_id"]
     with connect(cfg.database_path) as db:
         rows = [dict(row) for row in db.execute(
             "SELECT age_band,education_stage,topic_familiarity,anchor_score,guardian_consented FROM sessions")]
-    assert {row["age_band"] for row in rows} == {"18-24", "65-74"}
+    assert {row["age_band"] for row in rows} == {"18-20", "24-25"}
     assert all(row["education_stage"] == "bachelor" and row["topic_familiarity"] == 3
                and row["anchor_score"] == len(ANCHOR_ITEMS) for row in rows)
 
 
-def test_minor_requires_assent_guardian_and_separate_code_in_pilot(tmp_path):
-    no_code = replace(settings(tmp_path, "pilot"), model_name="local-test-model")
-    client = TestClient(create_app(no_code))
-    payload = start_payload(age_band="12-14")
-    assert client.post("/api/start", json=payload).status_code == 403
-    with_code = replace(no_code, database_path=tmp_path / "minor.sqlite3", minor_access_code="guardian-code")
-    client = TestClient(create_app(with_code))
-    assert client.post("/api/start", json={**payload, "minor_access_code": "guardian-code"}).status_code == 403
-    with_code = replace(with_code, under14_privacy_notice_url="https://example.org/under14-policy")
-    client = TestClient(create_app(with_code))
-    assert client.post("/api/start", json={**payload, "participant_assent": False,
-                                           "minor_access_code": "guardian-code"}).status_code == 400
-    assert client.post("/api/start", json={**payload, "guardian_consent": False,
-                                           "minor_access_code": "guardian-code"}).status_code == 400
-    assert client.post("/api/start", json={**payload, "minor_access_code": "wrong"}).status_code == 403
-    started = client.post("/api/start", json={**payload, "minor_access_code": "guardian-code"})
-    assert started.status_code == 200
-    assert started.json()["task"]["id"] == "pilot-age-12-14-v4"
-    with connect(with_code.database_path) as db:
-        row = db.execute("SELECT guardian_consented,age_band FROM sessions").fetchone()
-    assert (row["guardian_consented"], row["age_band"]) == (1, "12-14")
+@pytest.mark.parametrize("age", ["12-14", "15-17", "18-24", "25-34", "75-plus", "17", "26", ""])
+def test_old_or_out_of_scope_age_cannot_be_enabled_by_legacy_minor_settings(tmp_path, age):
+    config = replace(settings(tmp_path, "pilot"), minor_access_code="guardian-code",
+                     under14_privacy_notice_url="https://example.org/under14-policy")
+    client = TestClient(create_app(config))
+    payload = {**start_payload(), "age_band": age, "minor_access_code": "guardian-code",
+               "participant_assent": True, "guardian_consent": True}
+    assert client.post("/api/start", json=payload).status_code == 422
+    assert client.get("/api/pretest", params={"age_band": age}).status_code == 422
+    with connect(config.database_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("stage", ["primary", "senior", "graduate", "other", "employed", "", "本科"])
+def test_start_rejects_non_student_education_stages(tmp_path, stage):
+    client = TestClient(create_app(settings(tmp_path)))
+    assert client.post("/api/start", json={**start_payload(), "education_stage": stage}).status_code == 422
+
+
+@pytest.mark.parametrize("confirmation", [False, None, "true", 1])
+def test_start_requires_explicit_boolean_current_enrollment_confirmation(tmp_path, confirmation):
+    client = TestClient(create_app(settings(tmp_path)))
+    assert client.post("/api/start", json={**start_payload(), "student_confirmed": confirmation}).status_code == 422
+
+
+def test_start_requires_confirmation_even_when_field_is_omitted(tmp_path):
+    client = TestClient(create_app(settings(tmp_path)))
+    payload = start_payload()
+    del payload["student_confirmed"]
+    assert client.post("/api/start", json=payload).status_code == 422

@@ -33,7 +33,7 @@ function content(element) {
   return [element.textContent, ...element.children.map(content)].filter(Boolean).join(' ');
 }
 function record(overrides = {}) {
-  return {id: 'record-123456789', task_id: 7, age_band: '18-24', is_demo: true, run_mode: 'pilot',
+  return {id: 'record-123456789', task_id: 7, age_band: '18-20', is_demo: true, run_mode: 'pilot',
     created_at: '2026-10-19T15:59:59+00:00', decision_started_at: '2026-10-19T16:00:59+00:00',
     ended_at: '2026-10-19T16:01:29+00:00', reviewed_at: '2026-10-19T16:02:29+00:00', task_completion_seconds: 90,
     dialogue_elapsed_seconds: 60, decision_elapsed_seconds: 30,
@@ -114,6 +114,27 @@ test('record analysis membership uses the automatic selector rather than the old
     analysis_exclusion_reasons: ['历史任务版本'], cohort_exclusion_reasons: []})]);
   await h.run('loadReviews()');
   assert.match(content(h.list()), /不计入当前统计：历史任务版本/);
+});
+
+test('synthetic showcase eligibility remains separate from real-study analysis eligibility', async () => {
+  const rows = [record({analysis_eligible:false,showcase_analysis_eligible:true,
+    analysis_exclusion_reasons:['合成记录不纳入真实研究分析']}),
+    record({id:'historical-synthetic',analysis_eligible:false,showcase_analysis_eligible:false,
+      showcase_analysis_exclusion_reasons:['历史材料版本']})];
+  const h = adminHarness(rows);
+  h.run('configureAdminEnvironment({showcase_mode:true})');
+  await h.run('loadReviews()');
+  const cards = h.list().querySelectorAll('article');
+  const current = cards.find(card => content(card).includes('展示统计可用'));
+  assert.ok(current);
+  assert.match(content(current), /展示统计可用 · 合成记录不纳入真实研究分析/);
+  assert.doesNotMatch(content(current), /不计入当前统计|无效/);
+  assert.ok(cards.some(card => /不计入当前展示统计：历史材料版本/.test(content(card))));
+
+  const realStudy = adminHarness([rows[0]]);
+  await realStudy.run('loadReviews()');
+  assert.match(content(realStudy.list()), /不计入当前统计：合成记录不纳入真实研究分析/);
+  assert.doesNotMatch(content(realStudy.list()), /展示统计可用/);
 });
 
 test('pretest QC flags have readable Chinese labels without changing record eligibility', async () => {
@@ -353,12 +374,12 @@ test('canonical record_id from the backend stays identical in the title and deta
   assert.equal(rows[0].record_id, 'R0093');
 });
 
-test('showcase presentation uses neutral record counts and the ordinary export buttons', () => {
+test('university showcase labels its synthetic record counts and retains ordinary export buttons', () => {
   const h = adminHarness([]);
   h.run('configureAdminEnvironment({showcase_mode:true,showcase_totals:{sessions:126,submitted:126,unsubmitted:0}})');
-  assert.match(content(h.document.getElementById('admin-mode')), /全部 126 条记录.*已完成 126 条.*未完成 0 条/);
-  assert.doesNotMatch(content(h.document.getElementById('admin-mode')), /演示|合成|测试/);
-  assert.equal(h.document.getElementById('synthetic-download-section').hidden, true);
+  assert.match(content(h.document.getElementById('admin-mode')), /大学生合成展示.*126 条记录.*已完成 126 条.*未完成 0 条/);
+  assert.match(content(h.document.getElementById('admin-mode')), /大学生合成展示/);
+  assert.equal(h.document.getElementById('synthetic-download-section').hidden, false);
   assert.equal(h.document.getElementById('analysis-export-link').textContent, '已完成记录 CSV');
   const ordinary = h.document.getElementById('data-export').querySelectorAll('a')
     .filter(link => (link.attributes.get('href') || '').startsWith('/api/admin/export?'));
@@ -370,20 +391,31 @@ test('showcase presentation uses neutral record counts and the ordinary export b
   assert.match(h.document.getElementById('data-export-description').textContent, /完整对话单独下载，各下载使用同一记录编号/);
 });
 
-test('showcase does not request the separate synthetic download catalogue', async () => {
+test('university showcase downloads only the current 126 batch and omits historical 600 data', async () => {
   const document = makeDocument();
   const requested = [];
+  const datasets = [
+    {design_version:'literacy-age-v5',available:true,n_total:600,n_completed:587,n_dropout:13,
+      files:[{key:'calibrated_csv',label:'历史600数据',available:true}]},
+    {design_version:'university-v1',available:true,n_total:126,n_completed:126,n_dropout:0,
+      notice:'大学生虚构记录，不是实证结果。',files:[{key:'csv',label:'当前大学生CSV',available:true},
+      {key:'materials_json',label:'共同问卷与任务',available:true}]},
+  ];
   const context = vm.createContext({document, console, fetch: async url => {
     requested.push(url);
-    assert.equal(url, '/api/info');
-    return response({showcase_mode:true});
+    return response(url === '/api/info' ? {showcase_mode:true} : {datasets});
   }});
   const source = fs.readFileSync(path.join(__dirname, '../static/admin-synthetic.js'), 'utf8');
   vm.runInContext(source, context);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(document.getElementById('synthetic-download-section').hidden, true);
+  assert.equal(document.getElementById('synthetic-download-section').hidden, false);
+  const catalogue = document.getElementById('synthetic-datasets');
+  assert.match(content(catalogue), /126条大学生合成记录/);
+  assert.doesNotMatch(content(catalogue), /600|历史600数据/);
+  const links = catalogue.querySelectorAll('a');
+  assert.deepEqual(links.map(link => link.href), ['/api/admin/synthetic-export?file=csv', '/api/admin/synthetic-export?file=materials_json']);
   await document.getElementById('refresh-button').emit('click');
-  assert.deepEqual(requested, ['/api/info']);
+  assert.deepEqual(requested, ['/api/info','/api/admin/synthetic-datasets','/api/admin/synthetic-datasets']);
 });
 
 test('showcase comparison renders the three supplied groups and updates from new data', () => {
@@ -438,13 +470,13 @@ test('showcase review rows omit repeated mode labels while normal rows retain th
 
 test('summary uses automatically included completed counts and never asks for review', async () => {
   const h = adminHarness([], async url => {
-    assert.equal(url, '/api/admin/summary?age_band=18-24');
+    assert.equal(url, '/api/admin/summary?age_band=18-20');
     return response({study_mode:'pilot', clarification_strategy:'module', active_task_title:'当前任务',
       groups:[{group_id:'S',sessions:70,submitted:66,completed_n:66,analysis_n:63,valid:9,valid_mean_score:80}],
       pending_reviews:100, strata:[],band_width:10,literacy_distribution:[],score_distribution:[],
       evidence_reveal_distribution:[],condition_comparison:{comparisons:[]},mean_reply_seconds:null});
   });
-  h.document.getElementById('admin-age-band').value = '18-24';
+  h.document.getElementById('admin-age-band').value = '18-20';
   await h.run('loadSummary()');
   const text = content(h.document.getElementById('summary'));
   assert.match(text, /分配 70 · 完成 66 · 纳入统计 63/);

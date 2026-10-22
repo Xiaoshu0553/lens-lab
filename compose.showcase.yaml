@@ -3,11 +3,11 @@ services:
     build:
       context: .
       network: host
-    image: lens-lab-showcase:20261020
+    image: lens-lab-showcase:university-v1
     environment:
       STUDY_MODE: demo
       SHOWCASE_MODE: "1"
-      DATABASE_PATH: /app/showcase-data/showcase.sqlite3
+      DATABASE_PATH: /app/university-showcase-data/showcase.sqlite3
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
       ASSIGNMENT_SEED: ${ASSIGNMENT_SEED:-lens-showcase-seed}
       MODEL_API_KEY: ""
@@ -15,13 +15,13 @@ services:
       MODEL_NAME: DEMO-RULE
       MODEL_TEMPERATURE: "0"
       MODEL_THINKING: disabled
-      MODEL_MAX_TOKENS: "800"
+      MODEL_MAX_TOKENS: "1600"
       MAX_TURNS: "12"
       MAX_MINUTES: "30"
       LITERACY_BAND_WIDTH: "10"
-      CLARIFICATION_STRATEGY: module
+      CLARIFICATION_STRATEGY: prompt
     volumes:
-      - ./showcase-data:/app/showcase-data
+      - ./university-showcase-data:/app/university-showcase-data
       - ./synthetic-datasets:/app/synthetic-datasets:ro
     ports:
       - "127.0.0.1:8001:8000"

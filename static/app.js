@@ -1,10 +1,17 @@
 const $ = (id) => document.getElementById(id);
 const RESEARCHER_PREVIEW = document.body?.dataset?.researcherPreview === "true";
-const STORAGE_KEY = RESEARCHER_PREVIEW ? "lens_preview_session_id" : "lens_session_id";
-const DRAFT_KEY = RESEARCHER_PREVIEW ? "lens_preview_pretest_draft_v1" : "lens_pretest_draft_v1";
-const HISTORY_KEY = RESEARCHER_PREVIEW ? "lens_preview_session_history" : "lens_session_history";
-const PENDING_MESSAGE_KEY = RESEARCHER_PREVIEW ? "lens_preview_pending_message" : "lens_pending_message";
-const PENDING_START_KEY = RESEARCHER_PREVIEW ? "lens_preview_pending_start" : "lens_pending_start";
+const previewApiPrefix = String(document.body?.dataset?.apiPrefix || "");
+const API_PREFIX = RESEARCHER_PREVIEW && /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*\/?$/.test(previewApiPrefix)
+  ? previewApiPrefix.replace(/\/$/, "") : "";
+const PREVIEW_STORAGE_SUFFIX = API_PREFIX ? `:${encodeURIComponent(API_PREFIX)}` : "";
+// university-v1 deliberately starts a fresh browser namespace for this study population.
+const STORAGE_KEY = (RESEARCHER_PREVIEW ? "lens_university_v1_preview_session_id" : "lens_university_v1_session_id") + PREVIEW_STORAGE_SUFFIX;
+const DRAFT_KEY = (RESEARCHER_PREVIEW ? "lens_university_v1_preview_pretest_draft_v1" : "lens_university_v1_pretest_draft_v1") + PREVIEW_STORAGE_SUFFIX;
+const HISTORY_KEY = (RESEARCHER_PREVIEW ? "lens_university_v1_preview_session_history" : "lens_university_v1_session_history") + PREVIEW_STORAGE_SUFFIX;
+const PENDING_MESSAGE_KEY = (RESEARCHER_PREVIEW ? "lens_university_v1_preview_pending_message" : "lens_university_v1_pending_message") + PREVIEW_STORAGE_SUFFIX;
+const PENDING_START_KEY = (RESEARCHER_PREVIEW ? "lens_university_v1_preview_pending_start" : "lens_university_v1_pending_start") + PREVIEW_STORAGE_SUFFIX;
+const UNIVERSITY_AGE_BANDS = new Set(["18-20", "21-23", "24-25"]);
+const UNIVERSITY_FORM_VERSION = "student-literacy-v1-30";
 const PAGE_SIZE = 6;
 const volatileStorage = new Map();
 function readStorage(storage, key) { try { return storage.getItem(key); } catch { return volatileStorage.get(key) || null; } }
@@ -40,7 +47,7 @@ let navigationSequence = 0;
 
 async function api(path, options = {}) {
   let response;
-  try { response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options }); }
+  try { response = await fetch(`${API_PREFIX}${path}`, { headers: { "Content-Type": "application/json" }, ...options }); }
   catch { throw new Error("网络连接失败，请检查网络后重试"); }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -64,9 +71,6 @@ function missingDecisionChoices() {
   if (!document.querySelector('input[name="decision-choice"]') && !$('submission-input').value.trim()) missing.push("任务结论");
   return missing;
 }
-function isMinor() { return info?.age_bands.find((band) => band.id === $("age-band").value)?.family === "child"; }
-function minorIsOpen() { return !isMinor() || (info.minor_recruitment_open && ($("age-band").value !== "12-14" || info.under14_recruitment_open)); }
-
 function saveDraft() {
   if (!pretestVersion && draft.version && draft.ageBand === $("age-band").value) {
     draft = { ...draft, education: $("education-stage").value, familiarity: $("topic-familiarity").value };
@@ -82,14 +86,13 @@ function updateStartButton() {
   $("pretest-meter").max = pretestItems.length || 30;
   $("pretest-meter").value = completed;
   const missing = [];
-  if (!$("education-stage").value) missing.push("教育阶段");
+  if (!["college", "bachelor"].includes($("education-stage").value)) missing.push("在读学段");
+  if (!$("student-confirmed").checked) missing.push("在读学生确认");
   if (!$("topic-familiarity").value) missing.push("熟悉程度");
   if (!$("consent-check").checked) missing.push("参与同意");
-  if (isMinor() && (!$("guardian-consent").checked || !$("participant-assent").checked)) missing.push("监护人与本人同意");
-  if (isMinor() && info?.minor_access_code_required && !$("minor-access-code").value.trim()) missing.push("未成年人邀请码");
   if (info?.access_code_required && !$("access-code").value.trim()) missing.push("参与邀请码");
   if (completed !== pretestItems.length || !pretestItems.length) missing.unshift("全部判断题");
-  $("start-button").disabled = starting || Boolean(sessionId) || !currentAgeBand || !minorIsOpen() || missing.length > 0;
+  $("start-button").disabled = starting || Boolean(sessionId) || !UNIVERSITY_AGE_BANDS.has(currentAgeBand) || missing.length > 0;
   $("start-hint").textContent = missing.length ? `还需完成：${missing.join("、")}。` : "准备完成，可以开始。";
 }
 function renderPretestPage() {
@@ -147,20 +150,21 @@ async function loadPretest({ restore = false } = {}) {
   const restoreDraft = structuredClone(draft);
   const band = info.age_bands.find((entry) => entry.id === $("age-band").value);
   currentAgeBand = band?.id || "";
+  if (band && pretestVersion === UNIVERSITY_FORM_VERSION && pretestItems.length) {
+    // All three university age bands share this instrument; keep the current answers and page.
+    startRequestId = null; setError("start-error"); saveDraft(); updateStartButton(); return;
+  }
   pretestItems = []; pretestResponses = {}; pretestVersion = ""; pretestPage = 0;
   $("pretest-items").replaceChildren(); hide("pretest-nav"); hide("start-controls"); show("pretest-loading");
-  $("minor-consent").hidden = !isMinor();
-  $("under14-policy").hidden = band?.id !== "12-14" || !info.under14_recruitment_open;
-  $("minor-access-code").parentElement.hidden = !isMinor() || !info.minor_access_code_required;
   setError("pretest-error"); setError("start-error"); updateStartButton();
   if (!band) { $("pretest-loading").textContent = "选择年龄区间后载入问卷。"; return; }
-  if (!minorIsOpen()) { $("pretest-loading").textContent = "该年龄组尚未开放，请联系研究者完成监护人同意流程。"; return; }
   $("pretest-loading").textContent = "正在载入问卷…";
   try {
     const form = await api(`/api/pretest?age_band=${encodeURIComponent(band.id)}`);
     if (sequence !== pretestLoadSequence) return;
+    if (form.version !== UNIVERSITY_FORM_VERSION) throw new Error("问卷版本与当前大学生方案不一致，请刷新页面后重试");
     pretestItems = form.items; pretestVersion = form.version;
-    if (restore && restoreDraft.ageBand === band.id && restoreDraft.version === form.version) {
+    if (restore && restoreDraft.version === form.version) {
       for (const item of form.items) {
         const answer = restoreDraft.answers?.[item.id];
         if (Number.isInteger(answer) && answer >= 0 && answer < item.options.length) pretestResponses[item.id] = answer;
@@ -358,14 +362,23 @@ async function beginNewSession() {
 
 async function init() {
   try {
-    info = await api("/api/info"); maxTurns = info.max_turns;
+    info = await api(RESEARCHER_PREVIEW ? "/api/info?researcher_preview=true" : "/api/info"); maxTurns = info.max_turns;
+    info.age_bands = (info.age_bands || []).filter((band) => UNIVERSITY_AGE_BANDS.has(band.id));
     $("access-code-label").hidden = !info.access_code_required;
-    if (info.under14_privacy_notice_url) $("under14-policy-link").href = info.under14_privacy_notice_url;
+    const education = $("education-stage");
+    education.replaceChildren();
+    const emptyEducation = document.createElement("option"); emptyEducation.value = ""; emptyEducation.textContent = "请选择"; education.append(emptyEducation);
+    const stages = info.eligibility?.education_stages || [{id: "college", label: "在读专科"}, {id: "bachelor", label: "在读本科"}];
+    for (const stage of stages.filter((entry) => ["college", "bachelor"].includes(entry.id))) {
+      const option = document.createElement("option"); option.value = stage.id; option.textContent = stage.label; education.append(option);
+    }
     for (const band of info.age_bands || []) {
       const option = document.createElement("option"); option.value = band.id; option.textContent = band.label; $("age-band").append(option);
     }
     show("mode-banner");
-    $("mode-banner").textContent = RESEARCHER_PREVIEW ? "测试 · 请独立完成信息素养测试和任务。" : info.study_mode === "live"
+    $("mode-banner").textContent = RESEARCHER_PREVIEW
+      ? info.study_mode === "demo" ? "研究者试跑 · 规则演示。" : "研究者试跑 · 真实模型。"
+      : info.study_mode === "live"
       ? "正式实验 · 请独立完成本次任务。" : "任务测试 · 先完成信息素养测试，再与 AI 查证资料。";
     if (info.age_bands.some((band) => band.id === draft.ageBand)) {
       $("age-band").value = draft.ageBand; $("education-stage").value = draft.education || ""; $("topic-familiarity").value = draft.familiarity || "";
@@ -392,13 +405,11 @@ $("text-size-button").addEventListener("click", () => {
 if (readStorage(localStorage, "lens_large_text") === "1") { document.documentElement.classList.add("large-text"); $("text-size-button").setAttribute("aria-pressed", "true"); }
 $("pretest-prev").addEventListener("click", () => { if (pretestPage > 0) { pretestPage--; renderPretestPage(); saveDraft(); setError("pretest-error"); focusQuestionHeading(); } });
 $("pretest-next").addEventListener("click", () => { if (pageComplete()) { pretestPage++; renderPretestPage(); saveDraft(); focusQuestionHeading(); } });
-for (const id of ["consent-check", "guardian-consent", "participant-assent", "education-stage", "topic-familiarity", "access-code", "minor-access-code"]) {
-  $(id).addEventListener(["access-code", "minor-access-code"].includes(id) ? "input" : "change", () => { startRequestId = null; updateStartButton(); if (["education-stage", "topic-familiarity"].includes(id)) saveDraft(); });
+for (const id of ["consent-check", "student-confirmed", "education-stage", "topic-familiarity", "access-code"]) {
+  $(id).addEventListener(id === "access-code" ? "input" : "change", () => { startRequestId = null; updateStartButton(); if (["education-stage", "topic-familiarity"].includes(id)) saveDraft(); });
 }
 $("age-band").addEventListener("change", async () => {
-  const requested = $("age-band").value;
-  if (Object.keys(pretestResponses).length && requested !== currentAgeBand && !confirm("切换年龄区间将更换问卷，并清除当前作答。确认切换？")) { $("age-band").value = currentAgeBand; return; }
-  const restore = draft.ageBand === requested;
+  const restore = draft.version === UNIVERSITY_FORM_VERSION;
   startRequestId = null; await loadPretest({ restore });
 });
 $("start-button").addEventListener("click", async () => {
@@ -407,9 +418,8 @@ $("start-button").addEventListener("click", async () => {
   for (const control of $("consent-panel").querySelectorAll("input,select,button")) control.disabled = true;
   try {
     const payload = { researcher_preview: RESEARCHER_PREVIEW, consent: $("consent-check").checked,
-      age_band: currentAgeBand, education_stage: $("education-stage").value,
-      topic_familiarity: Number($("topic-familiarity").value), guardian_consent: $("guardian-consent").checked,
-      participant_assent: $("participant-assent").checked, minor_access_code: $("minor-access-code").value.trim(),
+      age_band: currentAgeBand, education_stage: $("education-stage").value, student_confirmed: $("student-confirmed").checked,
+      topic_familiarity: Number($("topic-familiarity").value),
       pretest_version: pretestVersion, pretest_answers: Object.fromEntries(pretestItems.map((item) => [item.id, pretestResponses[item.id]])), access_code: $("access-code").value.trim() };
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(payload)));
     const payloadHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -428,6 +438,15 @@ $("start-button").addEventListener("click", async () => {
     for (const control of $("consent-panel").querySelectorAll("input,select,button")) control.disabled = false;
     if (pretestItems.length) renderPretestPage(); else updateStartButton();
   }
+});
+let messageComposing = false;
+$("message-input").addEventListener("compositionstart", () => { messageComposing = true; });
+$("message-input").addEventListener("compositionend", () => { messageComposing = false; });
+$("message-input").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || messageComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  if (event.repeat || $("message-input").disabled || $("send-button").disabled || !$("message-input").value.trim()) return;
+  $("chat-form").requestSubmit();
 });
 $("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();

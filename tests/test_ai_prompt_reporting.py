@@ -60,7 +60,7 @@ def test_records_exports_and_summaries_recompute_the_same_actions_for_regular_se
     client = TestClient(create_app(cfg))
     first = completed_fixture(client, cfg)
     second = completed_fixture(client, cfg)
-    older = completed_fixture(client, cfg, age="65-74")
+    older = completed_fixture(client, cfg, age="24-25")
     unfinished = client.post("/api/start", json=start_payload()).json()["session_id"]
     with connect(cfg.database_path) as db:
         rows = {row["group_id"]: row["id"] for row in db.execute(
@@ -107,10 +107,10 @@ def test_records_exports_and_summaries_recompute_the_same_actions_for_regular_se
     expected_aliases = {aliases[sid]: actual for sid, actual in expected.items()}
     for row in csv.DictReader(io.StringIO(dialogue_csv.text.lstrip("\ufeff"))):
         assert counts(row, DIALOGUE_COLUMNS) == expected_aliases[row[dict(DIALOGUE_COLUMNS)["record_id"]]]
-    summary = get(client, "/api/admin/summary?age_band=18-24")
+    summary = get(client, "/api/admin/summary?age_band=18-20")
     assert summary["ai_prompt_totals"] == {**dict(zip(FIELDS, [3, 2, 1])), "records_with_ai_prompt": 1, "record_count": 2}
     assert summary["ai_prompt_totals_all_ages"] == {**dict(zip(FIELDS, [5, 2, 3])), "records_with_ai_prompt": 2, "record_count": 3}
-    older_summary = get(client, "/api/admin/summary?age_band=65-74")
+    older_summary = get(client, "/api/admin/summary?age_band=24-25")
     assert older_summary["ai_prompt_totals"] == {**dict(zip(FIELDS, [2, 0, 2])), "records_with_ai_prompt": 1, "record_count": 1}
     with connect(cfg.database_path) as db:
         assert before == [tuple(row) for row in db.execute("SELECT * FROM sessions ORDER BY id")]

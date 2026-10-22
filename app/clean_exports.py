@@ -16,14 +16,19 @@ from .literacy import ITEMS
 QUESTION_IDS = tuple(item["id"] for item in ITEMS)
 RECORD_COLUMNS = (
     ("record_id", "记录编号"),
+    ("record_kind", "记录类型"), ("is_synthetic", "合成数据(1是/0否)"),
+    ("data_origin", "数据来源"), ("timestamp_is_simulated", "模拟时间(1是/0否)"),
+    ("platform_analysis_eligible", "可纳入正式参与者分析(1是/0否)"),
+    ("showcase_analysis_eligible", "可用于模拟展示统计(1是/0否)"),
     ("age_band", "年龄区间"), ("education_stage", "教育阶段"), ("topic_familiarity", "信息核对熟悉度(1-5)"),
+    ("student_confirmed", "18–25岁在读专本科身份已确认(1是/0否)"),
     ("group_id", "实验组(S标准/A澄清)"), ("interaction_condition", "交互条件"),
     ("clarification_strategy", "澄清策略"), ("task_title", "任务名称"), ("scenario_id", "任务情境"),
     ("questionnaire_version", "问卷版本"), ("literacy_score", "前测答对题数(0-30)"),
     ("literacy_percent", "前测得分(%)"), ("literacy_band", "素养得分区间"),
     ("literacy_group", "素养分组"), ("anchor_score", "公共锚题答对数(0-18)"),
 ) + tuple((f"pretest_{key}_choice", f"前测{key}选项(1-4)") for key in QUESTION_IDS) + (
-    ("completion_status", "完成状态"), ("analysis_eligible", "纳入当前分析"),
+    ("completion_status", "完成状态"), ("analysis_eligible", "纳入正式参与者分析"),
     ("analysis_exclusion_reasons", "未纳入原因"), ("decision_choice", "参加方案"),
     ("execution_choice", "办理方案"), ("decision_quality_score", "决策质量分(0-100)"),
     ("decision_feasible", "方案可行(1是/0否)"), ("decision_optimal", "达到最优目标(1是/0否)"),
@@ -38,7 +43,9 @@ RECORD_COLUMNS = (
     ("ended_at_beijing", "提交时间(北京时间)"),
 )
 DIALOGUE_METADATA_KEYS = (
-    "record_id", "age_band", "education_stage", "group_id", "interaction_condition", "clarification_strategy",
+    "record_kind", "is_synthetic", "data_origin", "timestamp_is_simulated", "platform_analysis_eligible",
+    "showcase_analysis_eligible", "analysis_eligible",
+    "record_id", "age_band", "education_stage", "student_confirmed", "group_id", "interaction_condition", "clarification_strategy",
     "task_title", "scenario_id", "literacy_score", "literacy_percent", "literacy_band",
     "ai_prompt_count", "ai_clarification_count", "ai_guidance_count",
 )
@@ -169,6 +176,8 @@ def clean_record(record):
 
 
 DISPLAY_VALUES = {
+    "record_kind": {"participant": "参与者", "researcher_preview": "研究者试跑", "synthetic": "合成展示", "unclassified": "历史未分类"},
+    "data_origin": {"participant": "参与者填写", "researcher_preview": "研究者试跑", "synthetic": "合成模拟"},
     "education_stage": {"primary": "小学", "junior": "初中", "senior": "高中或中职", "college": "专科",
                         "bachelor": "本科", "graduate": "研究生及以上", "other": "其他或不便说明"},
     "interaction_condition": {"standard": "标准交互", "adaptive": "澄清交互"},
@@ -200,7 +209,11 @@ def chinese_csv(records, columns):
     for record in records:
         values = []
         for key, _label in columns:
-            value = _csv_value(key, record.get(key))
+            if key == "education_stage" and record.get("student_confirmed") == 1:
+                from .student_materials import EDUCATION_STAGES
+                value = EDUCATION_STAGES.get(record.get(key), _csv_value(key, record.get(key)))
+            else:
+                value = _csv_value(key, record.get(key))
             if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
                 value = "'" + value
             values.append(value)

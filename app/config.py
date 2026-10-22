@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def validate_preview_api_prefix(value: str) -> str:
+    if value and not re.fullmatch(r"/(?:[A-Za-z0-9_-]+)(?:/[A-Za-z0-9_-]+)*", value):
+        raise ValueError("PREVIEW_API_PREFIX 必须为空或同源绝对路径前缀")
+    return value
 
 
 def load_dotenv(path: Path = ROOT / ".env") -> None:
@@ -34,15 +41,17 @@ class Settings:
     max_turns: int = 12
     max_minutes: int = 30
     group_cap: int = 0
-    clarification_strategy: str = "module"
+    clarification_strategy: str = "prompt"
     literacy_band_width: int = 10
     model_thinking: str = "disabled"
-    model_max_tokens: int = 800
+    model_max_tokens: int = 1600
     participant_access_code: str = ""
     minor_access_code: str = ""
     under14_privacy_notice_url: str = ""
     showcase_mode: bool = False
     synthetic_dataset_root: Path | None = None
+    preview_api_prefix: str = ""
+    researcher_preview_only: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,11 +63,17 @@ class Settings:
         if showcase_flag not in {"0", "1"}:
             raise ValueError("SHOWCASE_MODE 只能是 0 或 1")
         showcase_mode = showcase_flag == "1"
+        preview_only_flag = os.getenv("RESEARCHER_PREVIEW_ONLY", "0")
+        if preview_only_flag not in {"0", "1"}:
+            raise ValueError("RESEARCHER_PREVIEW_ONLY 只能是 0 或 1")
+        preview_prefix = validate_preview_api_prefix(os.getenv("PREVIEW_API_PREFIX", ""))
         if showcase_mode and mode != "demo":
             raise ValueError("演示成品只能使用 STUDY_MODE=demo")
-        strategy = os.getenv("CLARIFICATION_STRATEGY", "module").lower()
+        strategy = os.getenv("CLARIFICATION_STRATEGY", "prompt").lower()
         if strategy not in {"module", "prompt"}:
             raise ValueError("CLARIFICATION_STRATEGY 只能是 module 或 prompt")
+        # Accept old deployment files while always using the two-arm prompt design.
+        strategy = "prompt"
         band_width = int(os.getenv("LITERACY_BAND_WIDTH", "10"))
         if not 1 <= band_width <= 100 or 100 % band_width:
             raise ValueError("LITERACY_BAND_WIDTH 必须是能整除 100 的正整数")
@@ -70,7 +85,7 @@ class Settings:
         local_provider = urlparse(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
         if mode in {"pilot", "live"} and not key and not local_provider:
             raise ValueError("远程模型服务必须配置 MODEL_API_KEY；本地 Ollama 可以留空")
-        db = Path(os.getenv("DATABASE_PATH", str(ROOT / "data" / "lens.sqlite3")))
+        db = Path(os.getenv("DATABASE_PATH", str(ROOT / "university-data" / "lens.sqlite3")))
         if not db.is_absolute():
             db = ROOT / db
         model_name = os.getenv("MODEL_NAME", "example-model-id")
@@ -79,7 +94,7 @@ class Settings:
         thinking = os.getenv("MODEL_THINKING", "disabled").lower()
         if thinking not in {"enabled", "disabled"}:
             raise ValueError("MODEL_THINKING 只能是 enabled 或 disabled")
-        max_tokens = int(os.getenv("MODEL_MAX_TOKENS", "800"))
+        max_tokens = int(os.getenv("MODEL_MAX_TOKENS", "1600"))
         if not 1 <= max_tokens <= 8192:
             raise ValueError("MODEL_MAX_TOKENS 必须在 1–8192 之间")
         max_turns = int(os.getenv("MAX_TURNS", "12"))
@@ -115,4 +130,6 @@ class Settings:
             under14_privacy_notice_url=os.getenv("UNDER14_PRIVACY_NOTICE_URL", ""),
             showcase_mode=showcase_mode,
             synthetic_dataset_root=Path(os.environ["SYNTHETIC_DATASET_ROOT"]) if os.getenv("SYNTHETIC_DATASET_ROOT") else None,
+            preview_api_prefix=preview_prefix,
+            researcher_preview_only=preview_only_flag == "1",
         )

@@ -1,8 +1,8 @@
-/* The independent download catalogue is unnecessary inside a showcase database. */
+/* The current catalogue contains only the university-v1 synthetic batch. */
 (() => {
   const container = document.getElementById("synthetic-datasets");
   if (!container) return;
-  const allowed = new Set(["calibrated_csv", "calibrated_json", "natural_csv", "pretest_csv", "xlsx", "zip"]);
+  const allowed = new Set(["csv", "json", "readme", "materials_json", "manifest_json", "zip"]);
   let requestVersion = 0;
   let showcaseMode = null;
   function element(tag, text, className = "") {
@@ -12,7 +12,7 @@
     return item;
   }
   async function loadSyntheticDatasets() {
-    if (showcaseMode !== false) return;
+    if (showcaseMode === null) return;
     const version = ++requestVersion;
     try {
       const response = await fetch("/api/admin/synthetic-datasets", { credentials: "same-origin", cache: "no-store" });
@@ -30,12 +30,14 @@
       if (version !== requestVersion) return;
       const sections = [];
       for (const dataset of data.datasets || []) {
+        if (dataset.design_version !== "university-v1") continue;
         const section = element("div", "");
         if (dataset.available) {
-          section.append(element("p", `${dataset.n_total}条合成记录：${dataset.n_completed}条已完成、${dataset.n_dropout}条未完成。导出包含全部年龄区间。`));
+          section.append(element("p", `${dataset.n_total}条大学生合成记录：${dataset.n_completed}条已完成、${dataset.n_dropout}条未完成。覆盖18–25岁在读专科、本科学生，三个年龄区间共用30题。`));
         } else {
           section.append(element("p", "合成数据文件尚不可用，请联系研究负责人核对上传文件。", "error"));
         }
+        if (dataset.notice) section.append(element("p", dataset.notice, "muted"));
         if (dataset.calibration_note) section.append(element("p", dataset.calibration_note, "muted"));
         const actions = element("div", "", "actions");
         for (const file of dataset.files || []) {
@@ -52,7 +54,7 @@
         section.append(actions);
         sections.push(section);
       }
-      container.replaceChildren(...(sections.length ? sections : [element("p", "暂无可下载的合成数据。", "muted")]));
+      container.replaceChildren(...(sections.length ? sections : [element("p", "暂无当前大学生方案的合成数据。历史跨年龄数据不列入当前下载。", "muted")]));
     } catch (error) {
       if (version === requestVersion) container.replaceChildren(element("p", error.message, "error"));
     }
@@ -64,8 +66,7 @@
       const info = await response.json();
       showcaseMode = info.showcase_mode === true;
       const section = document.getElementById("synthetic-download-section");
-      if (section) section.hidden = showcaseMode;
-      if (showcaseMode) return;
+      if (section) section.hidden = false;
       await loadSyntheticDatasets();
     } catch (error) {
       container.replaceChildren(element("p", error.message, "error"));

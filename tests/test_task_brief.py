@@ -3,12 +3,12 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.age_forms import AGE_BANDS, form_for
-from app.age_tasks import task_for
+from app.student_materials import AGE_BANDS, form_for
+from app.student_materials import task_for
 from app.db import connect
 from app.main import create_app
 from app.config import Settings
-from app.seed import seed_demo
+from app.student_seed import seed_student_materials
 
 
 def settings(tmp_path, mode='demo'):
@@ -17,16 +17,16 @@ def settings(tmp_path, mode='demo'):
                     model_name='test', model_temperature=0, assignment_seed='fixed')
 
 
-def start_payload(age='35-44'):
+def start_payload(age='21-23'):
     version, items = form_for(age)
-    return dict(consent=True, age_band=age, education_stage='other', topic_familiarity=3,
+    return dict(consent=True, age_band=age, education_stage='bachelor', student_confirmed=True, topic_familiarity=3,
                 pretest_version=version, pretest_answers={item['id']: item['correct'] for item in items})
 
 
 def test_brief_states_person_goal_and_deliverable_without_revealing_intervention():
     for age in AGE_BANDS:
         task = task_for(age)
-        assert task['id'].endswith('-v4') and '陈禾' in task['title']
+        assert task['id'].endswith('-v1') and '陈禾' in task['title']
         assert '预测试' not in task['title']
         text = task['instructions']
         assert all(part in text for part in ('陈禾', '目标：', '登记类别', '参加安排', '参加方案', '办理方案', '无需实际报名'))
@@ -57,48 +57,47 @@ def test_seed_upgrade_replaces_only_bundled_tasks_and_keeps_snapshot_and_custom(
     sid=client.post('/api/start',json=start_payload()).json()['session_id']
     with connect(cfg.database_path) as db:
         frozen=json.loads(db.execute('SELECT task_snapshot_json FROM sessions WHERE id=?',(sid,)).fetchone()[0])
-        current=task_for('35-44')['id']
+        current=task_for('21-23')['id']
         copy_task(db,current,'pilot-age-35-44-v2',active=1)
-        db.execute('DELETE FROM tasks WHERE id=?',(task_for('45-54')['id'],))
-        copy_task(db,task_for('18-24')['id'],'pilot-age-45-54-v2',active=1)
-        db.execute("UPDATE tasks SET age_band='45-54' WHERE id='pilot-age-45-54-v2'")
-        db.execute('DELETE FROM tasks WHERE id=?',(task_for('55-64')['id'],))
+        db.execute("UPDATE tasks SET age_band='35-44' WHERE id='pilot-age-35-44-v2'")
+        db.execute('DELETE FROM tasks WHERE id=?',(task_for('18-20')['id'],))
+        copy_task(db,current,'pilot-age-18-24-v4',active=1)
+        db.execute("UPDATE tasks SET age_band='18-24' WHERE id='pilot-age-18-24-v4'")
+        db.execute('DELETE FROM tasks WHERE id=?',(task_for('24-25')['id'],))
         copy_task(db,current,'researcher-custom',active=1)
-        db.execute("UPDATE tasks SET age_band='55-64' WHERE id='researcher-custom'")
-        # Exercise upgrade from demo to pilot when the old grant task is absent.
-        db.execute("DELETE FROM tasks WHERE id='pilot-xinghe-learning-2026-v5'")
-    seed_demo(cfg.database_path,'pilot')
+        db.execute("UPDATE tasks SET age_band='24-25' WHERE id='researcher-custom'")
+        seed_student_materials(db)
     with connect(cfg.database_path) as db:
         assert db.execute("SELECT active FROM tasks WHERE id='pilot-age-35-44-v2'").fetchone()[0]==0
         assert db.execute("SELECT active FROM tasks WHERE id='researcher-custom'").fetchone()[0]==1
 
-        assert db.execute('SELECT active FROM tasks WHERE id=?',(task_for('45-54')['id'],)).fetchone()[0]==1
-        assert db.execute('SELECT active FROM tasks WHERE id=?',(task_for('55-64')['id'],)).fetchone()[0]==0
+        assert db.execute("SELECT active FROM tasks WHERE id='pilot-age-18-24-v4'").fetchone()[0]==0
+        assert db.execute('SELECT active FROM tasks WHERE id=?',(task_for('18-20')['id'],)).fetchone()[0]==1
+        assert db.execute('SELECT active FROM tasks WHERE id=?',(task_for('24-25')['id'],)).fetchone()[0]==0
         assert json.loads(db.execute('SELECT task_snapshot_json FROM sessions WHERE id=?',(sid,)).fetchone()[0])==frozen
     # Starting the server again must not create duplicates or replace a custom task.
-    seed_demo(cfg.database_path,'pilot')
     with connect(cfg.database_path) as db:
-        assert db.execute('SELECT count(*) FROM tasks WHERE id=?',(task_for('45-54')['id'],)).fetchone()[0]==1
+        seed_student_materials(db)
+        assert db.execute('SELECT count(*) FROM tasks WHERE id=?',(task_for('18-20')['id'],)).fetchone()[0]==1
         assert db.execute("SELECT active FROM tasks WHERE id='researcher-custom'").fetchone()[0]==1
 
 
-def test_seed_recovers_an_existing_inactive_replacement_but_respects_manual_stop(tmp_path):
+def test_seed_retires_legacy_but_respects_existing_student_manual_stop(tmp_path):
     cfg=settings(tmp_path)
     create_app(cfg)
-    current=task_for('35-44')['id']
+    current=task_for('21-23')['id']
     with connect(cfg.database_path) as db:
         copy_task(db,current,'pilot-age-35-44-v2',active=1)
         db.execute('UPDATE tasks SET active=0 WHERE id=?',(current,))
-    seed_demo(cfg.database_path)
-    with connect(cfg.database_path) as db:
-        assert db.execute('SELECT active FROM tasks WHERE id=?',(current,)).fetchone()[0]==1
-        db.execute('UPDATE tasks SET active=0 WHERE id=?',(current,))
-    seed_demo(cfg.database_path)
+        seed_student_materials(db)
+        assert db.execute("SELECT active FROM tasks WHERE id='pilot-age-35-44-v2'").fetchone()[0]==0
+        assert db.execute('SELECT active FROM tasks WHERE id=?',(current,)).fetchone()[0]==0
+    create_app(cfg)
     with connect(cfg.database_path) as db:
         assert db.execute('SELECT active FROM tasks WHERE id=?',(current,)).fetchone()[0]==0
 
 
-def test_personal_fact_and_course_rule_remain_distinct_in_both_arms(tmp_path):
+def test_personal_fact_and_activity_rule_remain_distinct_in_both_arms(tmp_path):
     client=TestClient(create_app(settings(tmp_path)))
     sessions=[client.post('/api/start',json=start_payload()).json() for _ in range(2)]
     assert {session['group_id'] for session in sessions}=={'S','A'}
@@ -110,5 +109,5 @@ def test_personal_fact_and_course_rule_remain_distinct_in_both_arms(tmp_path):
         assert client.post(endpoint,json={'content':'我现在告诉你，陈禾每周可参加三次活动'}).status_code==200
         known=client.post(endpoint,json={'content':'陈禾每周可以参加几次？'}).json()
         assert '三次' in known['content'] and '你此前提供' in known['content']
-        rule=client.post(endpoint,json={'content':'课程要求每周至少参加几次？'}).json()
+        rule=client.post(endpoint,json={'content':'活动要求每周至少参加几次？'}).json()
         assert rule['action']=='evidence' and '每周必须到场2次' in rule['content']

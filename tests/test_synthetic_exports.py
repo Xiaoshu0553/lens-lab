@@ -1,4 +1,4 @@
-"""Private synthetic artifacts stay separate from participant study records."""
+"""Current student downloads and archived registrar security regressions."""
 import json
 from urllib.parse import unquote
 
@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.synthetic_exports import BATCH_ID, EXPORT_FILES, register_synthetic_exports
+from app.student_showcase import BATCH_ID as STUDENT_BATCH_ID
+from app.student_synthetic_exports import EXPORT_FILES as STUDENT_EXPORT_FILES
 from test_flow import auth, settings, start_payload
 
 
@@ -25,17 +27,30 @@ def write_artifacts(root):
 
 @pytest.fixture
 def artifact_client(tmp_path):
+    """Explicit legacy-only registrar, retained for archive security checks.
+
+    The current application's real default catalogue is tested separately.
+    """
     root = tmp_path / "synthetic-datasets"
     write_artifacts(root)
     app = create_app(settings(tmp_path))
-    # Reuse the real admin authentication closure, while injecting a fixture-only
-    # artifact root even when create_app already registers the production routes.
+    # Install the archived registrar explicitly; production no longer calls it.
     summary_route = next(route for route in app.routes if route.path == "/api/admin/summary")
     require_admin = summary_route.dependant.dependencies[0].call
     app.router.routes[:] = [route for route in app.router.routes
                             if getattr(route, "path", "") not in {
                                 "/api/admin/synthetic-datasets", "/api/admin/synthetic-export"}]
     register_synthetic_exports(app, require_admin, root)
+    return TestClient(app), root
+
+
+@pytest.fixture
+def current_artifact_client(tmp_path):
+    # Even a mounted historical package must not replace the new current batch.
+    root = tmp_path / "synthetic-datasets"
+    write_artifacts(root)
+    from dataclasses import replace
+    app = create_app(replace(settings(tmp_path), synthetic_dataset_root=root))
     return TestClient(app), root
 
 
@@ -137,26 +152,42 @@ def test_artifact_symlink_cannot_escape_the_approved_batch(artifact_client, tmp_
     assert response.status_code == 404 and "private material" not in response.text
 
 
-def test_cookie_login_authorizes_downloads_and_logout_revokes_them(artifact_client):
-    client, _root = artifact_client
+def test_cookie_login_authorizes_current_downloads_and_logout_revokes_them(current_artifact_client):
+    client, _root = current_artifact_client
     assert client.post("/api/admin/login", json={
         "username": "admin", "password": "test-password"}).status_code == 200
     assert client.get("/api/admin/synthetic-datasets").status_code == 200
-    assert client.get("/api/admin/synthetic-export?file=calibrated_json").status_code == 200
+    assert client.get("/api/admin/synthetic-export?file=json").status_code == 200
     assert client.post("/api/admin/logout").status_code == 200
-    assert client.get("/api/admin/synthetic-export?file=calibrated_json").status_code == 401
+    assert client.get("/api/admin/synthetic-export?file=json").status_code == 401
 
 
-def test_synthetic_downloads_leave_existing_raw_and_analysis_exports_unchanged(artifact_client):
-    client, _root = artifact_client
+def test_current_synthetic_downloads_leave_existing_raw_and_analysis_exports_unchanged(current_artifact_client):
+    client, _root = current_artifact_client
     sid = client.post("/api/start", json=start_payload()).json()["session_id"]
     paths = [f"/api/admin/archive-export?kind={kind}&format={format}"
              for kind in ["raw", "analysis"] for format in ["json", "csv"]]
     before = {path: client.get(path, headers=auth()).content for path in paths}
     assert [row["id"] for row in json.loads(before[paths[0]])] == [sid]
     assert json.loads(before[paths[2]]) == []
-    assert metadata(client)["n_total"] == 600
-    for key in EXPORT_FILES:
+    assert metadata(client)["n_total"] == 126
+    for key in STUDENT_EXPORT_FILES:
         assert client.get(f"/api/admin/synthetic-export?file={key}", headers=auth()).status_code == 200
     after = {path: client.get(path, headers=auth()).content for path in paths}
     assert after == before
+
+
+def test_default_app_exports_only_current_students_despite_mounted_legacy_artifacts(current_artifact_client):
+    client, root = current_artifact_client
+    data = metadata(client)
+    assert data["id"] == STUDENT_BATCH_ID and data["n_total"] == data["n_completed"] == 126
+    assert data["design_version"] == "university-v1"
+    assert {file["key"] for file in data["files"]} == set(STUDENT_EXPORT_FILES)
+    assert client.get("/api/admin/synthetic-export?file=calibrated_json", headers=auth()).status_code == 422
+    # Corrupting an unused historical package cannot affect the current export.
+    (root / BATCH_ID / EXPORT_FILES["calibrated_json"][0]).write_text("historical package unavailable")
+    rows = client.get("/api/admin/synthetic-export?file=json", headers=auth()).json()
+    assert len(rows) == 126
+    assert all(row["source_batch_id"] == STUDENT_BATCH_ID and row["student_confirmed"] == 1
+               and row["education_stage"] in {"college", "bachelor"}
+               and 18 <= row["exact_age"] <= 25 for row in rows)

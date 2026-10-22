@@ -12,7 +12,7 @@ from app.main import create_app
 from test_flow import auth, decision_payload, settings, start_payload
 
 
-def completed_fixture(client, cfg, *, score=100, review_status="pending", age="18-24"):
+def completed_fixture(client, cfg, *, score=100, review_status="pending", age="18-20"):
     sid = client.post("/api/start", json=start_payload(age_band=age)).json()["session_id"]
     with connect(cfg.database_path) as db:
         task = json.loads(db.execute("SELECT task_snapshot_json FROM sessions WHERE id=?", (sid,)).fetchone()[0])
@@ -121,7 +121,7 @@ def test_actual_submit_counts_immediately_and_records_expose_recomputed_objectiv
 def test_age_slices_and_all_age_exports_share_one_union_of_completed_records(tmp_path):
     cfg = settings(tmp_path)
     client = TestClient(create_app(cfg))
-    expected = {age: completed_fixture(client, cfg, age=age) for age in ["18-24", "65-74"]}
+    expected = {age: completed_fixture(client, cfg, age=age) for age in ["18-20", "24-25"]}
     aliases = record_aliases(client)
     for age, sid in expected.items():
         assert get(client, f"/api/admin/summary?age_band={age}")["cohort_session_ids"] == [aliases[sid]]
@@ -150,7 +150,7 @@ def test_dialogue_exports_preserve_sequence_content_source_and_empty_conversatio
     assert [message["message_index"] for message in messages] == [1, 2]
     assert [message["content"] for message in messages] == [question, answer]
     assert messages[0]["created_at_beijing"] == "2026-10-20T08:01:00+08:00"
-    assert all("session_id" not in row and "record_kind" not in row for row in records.values())
+    assert all("session_id" not in row and row["record_kind"] == "participant" and row["is_synthetic"] is False for row in records.values())
     archived = {row["id"]: row for row in archive_records(client)}
     assert archived[with_messages]["record_kind"] == "participant"
     assert archived[with_messages]["run_mode"] == "demo" and archived[with_messages]["is_demo"] == 1
