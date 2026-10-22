@@ -48,7 +48,8 @@ def test_new126_are_students_and_all_scores_recompute_from_new_materials():
         assert row["decision_feasible"] == int(decision["success"] and execution["success"])
         assert row["decision_optimal"] == int(decision["goal_met"] and execution["success"])
         assert row["is_synthetic"] == 1 and row["platform_analysis_eligible"] == 0
-        assert row["actual_model_latency_ms"] is None and row["mean_reply_seconds"] is None
+        assert row["actual_model_latency_ms"] is None and row["mean_reply_seconds"] > 0
+        assert row["reply_time_source"] == "estimated"
         assert row["timestamp_is_simulated"] == 1
         assert not any(event["event_type"] == "reply_latency" for event in row["model_events"])
         assert all(event["detail"]["conversation_source"] == "authored_template_not_model_output"
@@ -63,26 +64,29 @@ def test_mutating_return_value_does_not_change_frozen_batch():
     assert showcase.get_student_dataset() == expected
 
 
-def test_v3_source_policy_is_explicit_and_timestamps_are_not_future_pretest_observations():
+def test_v4_source_policy_is_explicit_and_timestamps_are_not_future_pretest_observations():
     data = showcase.get_student_dataset()
-    assert showcase.BATCH_ID == "student-126-20261022-v3"
+    assert showcase.BATCH_ID == "student-126-20261022-v4"
     manifest = data["manifest"]
     assert manifest["evidence_policy_is_simulated_assumption"] is True
     assert manifest["evidence_reveals_per_record_ranges"] == {"S": [1, 5], "A": [2, 8]}
     assert manifest["dialogue_seed"] == "student-dialogue-v3"
     assert manifest["parent_source_batch_id"] == "student-126-20261022-v2"
+    assert manifest["prior_process_batch_id"] == "student-126-20261022-v3"
+    assert manifest["reply_time_source"] == "estimated"
+    assert manifest["actual_model_latency_ms"] is None and manifest["actual_model_calls"] == 0
     assert "人工模拟假设" in manifest["evidence_policy"] and "不是真实模型" in manifest["evidence_policy"]
     assert manifest["no_group_score_effect"] is True and manifest["pretest_duration_recorded"] is False
     from datetime import datetime, timezone
     for row in data["records"]:
-        assert row["id"].startswith("SYNTH-STUDENT-V3-")
+        assert row["id"].startswith("SYNTH-STUDENT-V4-")
         assert row["source_batch_id"] == showcase.BATCH_ID
-        assert row["fixture_render_version"] == "student-authored-dialogue-v3"
+        assert row["fixture_render_version"] == "student-authored-dialogue-v4"
         assert row["synthetic_pretest_time_seconds"] is None
         assert datetime.fromisoformat(row["ended_at"]) < datetime(2026, 10, 22, 7, tzinfo=timezone.utc)
 
 
-def test_v3_preserves_the_independently_frozen_v2_personal_profiles():
+def test_v4_preserves_the_independently_frozen_v2_personal_profiles():
     import hashlib
     # This fingerprint was frozen from V2 before the process generator changed.
     # An ID-prefix change must not silently generate new answers or demographics.
@@ -97,11 +101,91 @@ def test_v3_preserves_the_independently_frozen_v2_personal_profiles():
     profiles = []
     for row in data["records"]:
         assert row["parent_source_batch_id"] == "student-126-20261022-v2"
-        assert row["parent_record_id"] == row["id"].replace("STUDENT-V3-", "STUDENT-V2-", 1)
+        assert row["parent_record_id"] == row["id"].replace("STUDENT-V4-", "STUDENT-V2-", 1)
         assert row["parent_profile_sha256"] == digest({key: row[key] for key in fields})
         profiles.append({"parent_record_id": row["parent_record_id"], **{key: row[key] for key in fields}})
     assert digest(profiles) == data["manifest"]["parent_profiles_sha256"] == (
         "01b5c2361e08d7a165623978732f6e4d5a16950732e11d1b3a489091f4daee40")
+
+
+def test_v4_preserves_v3_dialogue_text_actions_timestamps_paths_and_counts():
+    import hashlib
+    fields = ("fixture_dialogue_plan", "messages", "user_turns", "clarification_count",
+              "evidence_reveals", "distinct_evidence_cards", "flags", "process_alert_details")
+    data = showcase.get_student_dataset()
+    profiles = []
+    for row in data["records"]:
+        assert row["prior_process_batch_id"] == "student-126-20261022-v3"
+        assert row["prior_process_record_id"] == row["id"].replace("STUDENT-V4-", "STUDENT-V3-", 1)
+        profiles.append({"prior_process_record_id": row["prior_process_record_id"],
+                         "parent_record_id": row["parent_record_id"], **{key: row[key] for key in fields}})
+    digest = hashlib.sha256(json.dumps(profiles, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode()).hexdigest()
+    # This independent digest was taken before adding estimates to V3.
+    assert digest == data["manifest"]["prior_process_content_sha256"] == (
+        "984fe2f5ca8b059731fb8b500f34be5b8333627fa15aa2d22f58217acb52af40")
+
+
+def test_reply_estimates_match_saved_messages_and_remain_distinct_from_real_latency():
+    from datetime import datetime
+    from statistics import mean
+    data = showcase.get_student_dataset()
+    values, action_values = [], {"prompt_clarification": [], "answer": [], "evidence": []}
+    means = set()
+    for row in data["records"]:
+        events = [event for event in row["model_events"] if event["event_type"] == "reply_time_estimate"]
+        assert [event["detail"] for event in events] == row["reply_time_estimates"]
+        assert len(events) == row["reply_time_sample_count"] == row["user_turns"]
+        assert not any(event["event_type"] == "reply_latency" for event in row["model_events"])
+        latencies = []
+        for event in events:
+            detail = event["detail"]
+            message_index = detail["assistant_message_index"] - 1
+            user, reply = row["messages"][message_index - 1:message_index + 1]
+            assert user["role"] == "user" and reply["role"] == "assistant"
+            assert event["created_at"] == reply["created_at"] == detail["assistant_message_created_at"]
+            assert detail["user_message_created_at"] == user["created_at"]
+            window = round((datetime.fromisoformat(reply["created_at"])
+                            - datetime.fromisoformat(user["created_at"])).total_seconds() * 1000)
+            latency = detail["estimated_latency_ms"]
+            assert type(latency) is int and 0 < latency <= min(window, 8500)
+            assert detail["available_window_ms"] == window
+            assert detail["reply_character_count"] == len(reply["content"])
+            assert detail["reply_action"] == reply["action"]
+            assert detail["source"] == "estimated" and detail["is_estimate"] is True
+            assert detail["source_batch_id"] == showcase.BATCH_ID and detail["is_synthetic"] == 1
+            assert detail["estimator_version"] == row["reply_time_estimator_version"] == "student-reply-time-estimator-v1"
+            assert detail["reply_index"] == len(latencies) + 1
+            latencies.append(latency)
+            action_values[reply["action"]].append(latency)
+        assert row["reply_time_source"] == "estimated" and row["actual_model_latency_ms"] is None
+        assert row["estimated_reply_ms"] == round(mean(latencies), 2)
+        assert row["mean_reply_seconds"] == round(mean(latencies) / 1000, 2)
+        assert showcase.estimate_fixture_reply_times(row, row["messages"]) == row["reply_time_estimates"]
+        assert len(set(latencies)) > 1
+        means.add(row["mean_reply_seconds"])
+        values.extend(latencies)
+    assert len(values) == data["manifest"]["reply_time_estimate_count"] == 766
+    assert len(set(values)) > 400 and len(means) > 60
+    assert mean(action_values["prompt_clarification"]) < mean(action_values["answer"]) < mean(action_values["evidence"])
+    assert data["manifest"]["estimated_reply_mean_seconds"] == round(mean(values) / 1000, 2)
+    assert data["manifest"]["estimated_reply_range_ms"] == [min(values), max(values)]
+    assert 1 < min(means) < max(means) < 6
+
+
+def test_estimator_caps_at_actual_saved_window_without_moving_the_messages():
+    from datetime import datetime, timedelta
+    row = showcase.get_student_dataset()["records"][0]
+    messages = copy.deepcopy(row["messages"])
+    messages[1]["created_at"] = (datetime.fromisoformat(messages[0]["created_at"])
+                                   + timedelta(milliseconds=250)).isoformat()
+    before = copy.deepcopy(messages)
+    estimates = showcase.estimate_fixture_reply_times(row, messages)
+    assert estimates[0]["estimated_latency_ms"] == estimates[0]["available_window_ms"] == 250
+    assert messages == before
+    messages[1]["created_at"] = messages[0]["created_at"]
+    with pytest.raises(ValueError, match="正的既有"):
+        showcase.estimate_fixture_reply_times(row, messages)
 
 
 def test_more_adaptive_clues_are_actual_card_replies_in_every_age_band():
@@ -263,6 +347,7 @@ def test_seed_is_idempotent_and_preserves_independent_interactive_rows(tmp_path)
         assert conn.execute("SELECT record_kind FROM sessions WHERE id='independent-preview'").fetchone()[0] == "researcher_preview"
         assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 127
         assert conn.execute("SELECT COUNT(*) FROM model_events WHERE event_type='reply_latency'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM model_events WHERE event_type='reply_time_estimate'").fetchone()[0] == 766
         stored = json.loads(conn.execute("SELECT manifest_json FROM student_showcase_imports").fetchone()[0])
         assert stored["records_sha256"] == showcase.get_student_dataset()["manifest"]["records_sha256"]
         source_by_id = {row["id"]: row for row in showcase.get_student_dataset()["records"]}
@@ -270,6 +355,10 @@ def test_seed_is_idempotent_and_preserves_independent_interactive_rows(tmp_path)
             source = source_by_id[row["id"]]
             assert json.loads(row["process_alert_details_json"]) == source["process_alert_details"]
             assert json.loads(row["flags_json"]) == source["flags"]
+            assert json.loads(row["reply_time_estimates_json"]) == source["reply_time_estimates"]
+            assert row["reply_time_source"] == "estimated" and row["estimated_reply_ms"] == source["estimated_reply_ms"]
+            assert row["prior_process_batch_id"] == source["prior_process_batch_id"]
+            assert row["prior_process_record_id"] == source["prior_process_record_id"]
 
 
 @pytest.mark.parametrize("change", ["score", "message", "runtime"])
@@ -306,7 +395,7 @@ def test_old_nonempty_database_is_not_relabelled_or_overwritten(tmp_path):
         assert [tuple(row) for row in conn.execute("SELECT * FROM sessions ORDER BY id")] == before
 
 
-@pytest.mark.parametrize("old_batch", ["student-126-20261022-v1", "student-126-20261022-v2"])
+@pytest.mark.parametrize("old_batch", ["student-126-20261022-v1", "student-126-20261022-v2", "student-126-20261022-v3"])
 def test_older_receipt_is_not_reused_to_overwrite_an_existing_database(tmp_path, old_batch):
     settings = student_settings(tmp_path)
     init_db(settings.database_path)
@@ -333,7 +422,7 @@ def test_seed_guard_rejects_real_legacy_and_mismatched_database_paths(tmp_path):
         seed(conn, settings)
 
 
-def test_current_application_displays_all126_current_fixtures_without_model_latency(tmp_path):
+def test_current_application_uses_estimates_without_claiming_measured_model_latency(tmp_path):
     import base64
     from fastapi.testclient import TestClient
     from app.main import create_app
@@ -345,7 +434,7 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
     assert len(rows) == 126
     assert all(row["source_batch_id"] == showcase.BATCH_ID and row["in_current_cohort"]
                and row["platform_analysis_eligible"] == 0 for row in rows)
-    assert all(row["mean_reply_seconds"] is None for row in rows)
+    assert all(row["mean_reply_seconds"] > 0 and row["reply_time_source"] == "estimated" for row in rows)
     assert all(row["analysis_eligible"] is False and row["showcase_analysis_eligible"] is True for row in rows)
     source_by_id = {row["id"]: row for row in showcase.get_student_dataset()["records"]}
     source_by_alias = {}
@@ -357,12 +446,21 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
         assert archived["distinct_evidence_cards"] == source["distinct_evidence_cards"]
         assert archived["parent_source_batch_id"] == source["parent_source_batch_id"]
         assert archived["parent_record_id"] == source["parent_record_id"]
+        assert archived["mean_reply_seconds"] == source["mean_reply_seconds"]
+        assert archived["reply_time_sample_count"] == source["reply_time_sample_count"]
         assert [json.loads(event["detail_json"]) for event in json.loads(archived["model_events_json"])] == (
             [event["detail"] for event in source["model_events"]])
     expected_note_count = showcase.get_student_dataset()["manifest"]["process_alert_record_count"]
     assert sum(bool(row["process_alert_details"]) for row in rows) == expected_note_count
     assert all(detail["code"] == "pretest_uncertain_answers" and detail["is_simulated"] == 1
                for row in rows for detail in row["process_alert_details"])
+    reviews = client.get("/api/admin/review-queue", headers=headers).json()
+    assert len(reviews) == 126
+    for review in reviews:
+        source = source_by_alias[review["record_id"]]
+        assert review["mean_reply_seconds"] == source["mean_reply_seconds"]
+        assert review["reply_time_source"] == "estimated"
+        assert review["reply_time_sample_count"] == source["reply_time_sample_count"]
     for path in ("/api/admin/export?kind=raw&format=json", "/api/admin/export?kind=analysis&format=json",
                  "/api/admin/dialogue-export?format=json"):
         exported = client.get(path, headers=headers).json()
@@ -379,6 +477,9 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
             else:
                 assert exported_row["evidence_reveals"] == source["evidence_reveals"]
                 assert exported_row["distinct_evidence_cards"] == source["distinct_evidence_cards"]
+                assert exported_row["mean_reply_seconds"] == source["mean_reply_seconds"]
+                assert exported_row["reply_time_source"] == "estimated"
+                assert exported_row["reply_time_sample_count"] == source["reply_time_sample_count"]
     import csv
     import io
     from app.clean_exports import DIALOGUE_CSV_COLUMNS, RECORD_CSV_COLUMNS
@@ -405,6 +506,7 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
                 source = source_by_alias[flat["记录编号"]]
                 assert int(flat["资料线索次数"]) == source["evidence_reveals"]
                 assert int(flat["不同资料线索数"]) == source["distinct_evidence_cards"]
+                assert float(flat["AI平均回复耗时(秒)"]) == source["mean_reply_seconds"]
     for age in AGE_BANDS:
         response = client.get("/api/admin/summary", params={"age_band": age}, headers=headers)
         assert response.status_code == 200
@@ -412,7 +514,10 @@ def test_current_application_displays_all126_current_fixtures_without_model_late
         assert summary["showcase_totals"] == {"sessions": 126, "submitted": 126, "unsubmitted": 0}
         assert summary["completed_n"] == summary["analysis_n"] == 42
         assert {group["group_id"]: group["completed_n"] for group in summary["groups"]} == {"S": 21, "A": 21}
-        assert summary["mean_reply_seconds"] is None
+        latencies = [detail["estimated_latency_ms"] for row in showcase.get_student_dataset()["records"]
+                     if row["age_band"] == age for detail in row["reply_time_estimates"]]
+        assert summary["mean_reply_seconds"] == round(sum(latencies) / len(latencies) / 1000, 2)
+        assert summary["reply_time_source"] == "estimated"
         clues = {(item["group_id"], item["card_id"]): item["reveals"]
                  for item in summary["evidence_reveal_distribution"]}
         expected_clues = Counter((row["group_id"], event["detail"]["card_id"])

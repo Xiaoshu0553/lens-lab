@@ -313,7 +313,7 @@ async function loadSummary() {
     card.append(node("small", record.valid_mean_score == null ? "暂无自动评分" : `完成样本平均分 ${Number(record.valid_mean_score).toFixed(1)}`));
     box.append(card);
   }
-  box.append(node("p", data.mean_reply_seconds == null ? "暂无回复耗时记录" : `AI 平均回复耗时（服务端）：${data.mean_reply_seconds.toFixed(1)} 秒`, "wide muted"));
+  box.append(node("p", data.mean_reply_seconds == null ? "暂无回复耗时记录" : `AI 平均回复耗时：${data.mean_reply_seconds.toFixed(1)} 秒`, "wide muted"));
   const strataBox = $("strata-summary"); strataBox.replaceChildren();
   for (let start = 0; start < 100; start += data.band_width) {
     const end = start + data.band_width;

@@ -13,7 +13,7 @@
     <section class="card"><div class="card-heading"><div><p class="eyebrow">实验概况</p><h2>数据分布与组内分配</h2></div><button id="refresh-button" data-action-key="refresh" type="button" class="quiet">刷新</button></div><div id="showcase-comparison" hidden></div><label>查看年龄区间 <select id="admin-age-band"></select></label><p class="muted">统计限当前大学生方案、问卷、任务、模型与提示词配置。18–20、21–23、24–25岁只是背景分层，三个年龄区间使用同一套30题；数量为会话记录数，非去重人数。</p><div id="summary" class="summary-grid"></div><h3>AI主动提示汇总</h3><div id="ai-prompt-summary" aria-live="polite"></div><h3>信息判断题得分分布</h3><p class="muted">横轴为答对题数。蓝色：标准组；绿色：澄清组。可展开记录数表。</p><div id="literacy-distribution"></div><h3>各素养得分区间分配记录数</h3><div id="strata-summary" class="strata-grid"></div><h3>同年龄层内的决策质量分</h3><p class="muted">按已完成任务的自动评分统计。</p><div id="band-outcomes"></div><h3>完成记录的决策质量分分布</h3><div id="score-distribution"></div><h3>AI 提供的资料线索次数</h3><div id="source-distribution" class="strata-grid"></div></section>
     <section class="card"><p class="eyebrow">信息素养测试</p><h2>题目区分性检查</h2><p>分析当前问卷的信息素养测试作答，供结合样本量、专家审查与逐题指标定稿。</p><div id="pretest-analysis"></div></section>
     <section class="card" id="data-export"><p class="eyebrow">数据导出</p><h2 id="data-export-title">导出记录</h2><p id="data-export-description">记录 CSV/JSON 保留全部记录，包括未完成记录和历史版本。常用列包含记录编号、年龄、分组、信息素养与任务评分、用时及 AI 主动提示、澄清和引导次数。已完成记录 CSV 仅包含当前方案中完成整份信息素养测试并已提交任务的记录，用于统计；当前同一批记录全部完成时，两类导出的人数可以相同。完整对话单独下载，各下载使用同一记录编号。导出范围覆盖全部年龄，不受上方筛选影响。</p><div class="actions"><a class="button-link" href="/api/admin/export?kind=raw&format=csv">记录 CSV</a><a class="button-link" href="/api/admin/export?kind=raw&format=json">记录 JSON</a><a id="analysis-export-link" class="button-link" href="/api/admin/export?kind=analysis&format=csv">已完成记录 CSV</a></div><h3>单独导出对话</h3><p>按与已完成记录 CSV 相同的范围导出。CSV 每条消息一行，JSON 按会话保留完整消息列表。</p><div class="actions"><a class="button-link" href="/api/admin/dialogue-export?format=csv">对话 CSV</a><a class="button-link" href="/api/admin/dialogue-export?format=json">对话 JSON</a></div></section>
-    <section class="card"><p class="eyebrow">任务记录</p><h2>记录与对话查看</h2><p>只读查看各年龄区间的新旧记录、自动评分及完整对话。是否纳入当前统计以每条记录的说明为准。AI主动提示按对话中的澄清和引导计数。过程提醒依据已保存的答题选择、对话和资料获取记录生成，仅列出触发规则的具体依据，不改变评分或统计纳入。</p><p class="muted">AI 平均回复耗时由服务端记录；参与者页面的回复等待时间还包含网络传输与页面同步。任务阶段耗时可在记录中展开查看。</p><div id="review-list"></div></section>
+    <section class="card"><p class="eyebrow">任务记录</p><h2>记录与对话查看</h2><p>只读查看各年龄区间的新旧记录、自动评分及完整对话。是否纳入当前统计以每条记录的说明为准。AI主动提示按对话中的澄清和引导计数。过程提醒依据已保存的答题选择、对话和资料获取记录生成，仅列出触发规则的具体依据，不改变评分或统计纳入。</p><p class="muted">AI 平均回复耗时按各轮回复用时汇总；参与者页面的等待时间还受网络传输与页面同步影响。任务阶段耗时可在记录中展开查看。</p><div id="review-list"></div></section>
     <section class="card"><p class="eyebrow">任务管理</p><h2>新增实验任务</h2><p>已使用的任务不允许修改内容；新版本请新建任务。共享背景会发给 AI，参与者补充信息只展示给参与者。</p>
       <form id="task-form" class="task-form">
         <label>适用年龄区间<select id="task-age-band" name="age_band" required><option value="">请选择</option></select></label>
@@ -34,5 +34,5 @@
       </form><div id="task-list"></div>
     </section>
   </main>
-  <script src="/static/admin.js?v=university-v1-neutral-20261022" defer></script>
+  <script src="/static/admin.js?v=university-v1-reply-time-20261022" defer></script>
 </body></html>

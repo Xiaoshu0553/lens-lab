@@ -39,8 +39,10 @@ def test_catalogue_contains_only_new126_student_batch(client):
     assert len(datasets) == 1
     data = datasets[0]
     assert data["id"] == BATCH_ID and data["n_total"] == data["n_completed"] == 126
-    assert BATCH_ID == "student-126-20261022-v3"
+    assert BATCH_ID == "student-126-20261022-v4"
     assert data["parent_source_batch_id"] == "student-126-20261022-v2"
+    assert data["prior_process_batch_id"] == "student-126-20261022-v3"
+    assert data["reply_time_source"] == "estimated"
     assert data["n_dropout"] == 0 and data["design_version"] == "university-v1"
     assert data["age_range"] == [18, 25] and data["education_stages"] == ["college", "bachelor"]
     assert "不是真实受试者" in data["notice"] and "不能作为" in data["calibration_note"]
@@ -74,12 +76,17 @@ def test_csv_json_zip_all_hold_the_same_single_batch():
     assert [row["id"] for row in csv_rows] == [row["id"] for row in json_rows]
     for flat, row in zip(csv_rows, json_rows):
         assert json.loads(flat["literacy_answers"]) == row["literacy_answers"]
-        assert flat["actual_model_latency_ms"] == flat["mean_reply_seconds"] == ""
+        assert flat["actual_model_latency_ms"] == "" and float(flat["mean_reply_seconds"]) > 0
+        assert float(flat["mean_reply_seconds"]) == row["mean_reply_seconds"]
+        assert float(flat["estimated_reply_ms"]) == row["estimated_reply_ms"]
+        assert flat["reply_time_source"] == row["reply_time_source"] == "estimated"
+        assert json.loads(flat["reply_time_estimates"]) == row["reply_time_estimates"]
+        assert flat["reply_time_sample_count"] == str(len(row["reply_time_estimates"]))
         assert flat["platform_analysis_eligible"] == "0" and flat["student_confirmed"] == "1"
         assert flat["synthetic_pretest_time_seconds"] == ""
         assert json.loads(flat["process_alert_details"]) == row["process_alert_details"]
         assert json.loads(flat["flags"]) == row["flags"]
-        assert row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V3-")
+        assert row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V4-")
         assert flat["parent_record_id"] == row["parent_record_id"]
         assert flat["parent_source_batch_id"] == row["parent_source_batch_id"] == "student-126-20261022-v2"
         assert flat["parent_profile_sha256"] == row["parent_profile_sha256"]
@@ -92,13 +99,16 @@ def test_csv_json_zip_all_hold_the_same_single_batch():
     assert json.loads(payloads["manifest_json"]) == get_student_dataset()["manifest"]
     assert "人工模拟假设" in payloads["readme"].decode()
     assert "不是真实模型" in payloads["readme"].decode()
-    assert "V3沿用V2大学生合成批次" in payloads["readme"].decode()
+    assert "V4沿用V2大学生合成批次" in payloads["readme"].decode()
     assert "原V2个人随机键" in payloads["readme"].decode()
     assert "A组线索共308次，S组共195次" in payloads["readme"].decode()
+    assert "reply_time_estimate事件" in payloads["readme"].decode()
+    assert "不是provider实测耗时" in payloads["readme"].decode()
+    assert "actual_model_latency_ms仍为null" in payloads["readme"].decode()
 
 
-@pytest.mark.parametrize("old_batch", ["student-126-20261022-v1", "student-126-20261022-v2"])
-def test_an_older_external_directory_cannot_replace_the_current_v3_exports(tmp_path, old_batch):
+@pytest.mark.parametrize("old_batch", ["student-126-20261022-v1", "student-126-20261022-v2", "student-126-20261022-v3"])
+def test_an_older_external_directory_cannot_replace_the_current_v4_exports(tmp_path, old_batch):
     old = tmp_path / old_batch
     old.mkdir()
     (old / EXPORT_FILES["json"][0]).write_text('[{"id":"old-v1-only"}]')
@@ -107,7 +117,7 @@ def test_an_older_external_directory_cannot_replace_the_current_v3_exports(tmp_p
     client = TestClient(app)
     rows = client.get("/api/admin/synthetic-export?file=json").json()
     assert len(rows) == 126
-    assert all(row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V3-") for row in rows)
+    assert all(row["source_batch_id"] == BATCH_ID and row["id"].startswith("SYNTH-STUDENT-V4-") for row in rows)
     assert "old-v1-only" not in json.dumps(rows)
 
 

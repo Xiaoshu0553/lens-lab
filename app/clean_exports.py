@@ -39,6 +39,8 @@ RECORD_COLUMNS = (
     ("distinct_evidence_cards", "不同资料线索数"), ("process_alert_details", "过程提醒"),
     ("task_completion_seconds", "任务总耗时(秒)"), ("dialogue_elapsed_seconds", "对话阶段耗时(秒)"),
     ("decision_elapsed_seconds", "决策阶段耗时(秒)"), ("mean_reply_seconds", "AI平均回复耗时(秒)"),
+    ("reply_time_source", "回复用时来源"), ("reply_time_sample_count", "回复用时样本数"),
+    ("reply_time_estimator_version", "回复用时估算器版本"),
     ("created_at", "任务开始(UTC)"), ("decision_started_at", "进入决策(UTC)"), ("ended_at", "提交时间(UTC)"),
     ("created_at_beijing", "任务开始(北京时间)"), ("decision_started_at_beijing", "进入决策(北京时间)"),
     ("ended_at_beijing", "提交时间(北京时间)"),
@@ -63,6 +65,7 @@ CSV_OMITTED_KEYS = frozenset({
     "record_kind", "is_synthetic", "source_batch_id", "data_origin", "timestamp_is_simulated",
     "platform_analysis_eligible", "showcase_analysis_eligible", "analysis_eligible",
     "analysis_exclusion_reasons",
+    "reply_time_source", "reply_time_sample_count", "reply_time_estimator_version",
 })
 RECORD_CSV_COLUMNS = tuple(column for column in RECORD_COLUMNS if column[0] not in CSV_OMITTED_KEYS)
 DIALOGUE_CSV_COLUMNS = tuple(column for column in DIALOGUE_COLUMNS if column[0] not in CSV_OMITTED_KEYS)

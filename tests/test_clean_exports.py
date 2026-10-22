@@ -90,7 +90,7 @@ def test_main_download_schema_is_fixed_ordered_and_excludes_internal_provenance(
     records = get(client, "/api/admin/export?kind=raw&format=json").json()
     expected_keys = [key for key, _label in RECORD_COLUMNS]
     assert all(list(row) == expected_keys for row in records)
-    assert len(expected_keys) < 80 and expected_keys[0] == "record_id"
+    assert len(RECORD_CSV_COLUMNS) < 80 and expected_keys[0] == "record_id"
     forbidden = {"id", "session_id", "synthetic_source_json", "task_snapshot_json", "model_config_id", "model_base_url",
                  "fixture_conversation", "messages_json", "model_events_json",
                  "review_history_json", "review_status", "simulation_seed", "synthetic_pretest_time_seconds"}

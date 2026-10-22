@@ -29,7 +29,7 @@ EXPORT_FILES = {
 }
 EXPECTED_COUNTS = {"total": RECORD_COUNT, "completed": RECORD_COUNT, "dropout": 0}
 CALIBRATION_NOTE = (
-    "本批次未使用旧跨年龄600人或126人作答；V3保留V2大学生合成作答，单独重编对话过程。"
+    "本批次未使用旧跨年龄600人或126人作答；V4保留V2大学生合成作答及V3对话，补充回复处理用时估计。"
     "不按目标均值校准，不预设澄清组得分更高。"
     "模拟分差只由固定生成规则产生，不能作为干预效果或研究发现。" + EVIDENCE_POLICY
 )
@@ -52,14 +52,16 @@ def _readme(dataset: dict) -> str:
 合成身份中的在读确认值不能作为真实学生身份验证。
 
 独立来源：未读取、改写或重新包装旧跨年龄600/126条记录。
-V3沿用V2大学生合成批次{manifest['parent_source_batch_id']}中的逐人作答、决策、
-人口属性、情景、分组与起止时点，仅重新编写对话过程；V2来源本身不是实际受试者数据。
+V4沿用V2大学生合成批次{manifest['parent_source_batch_id']}中的逐人作答、决策、
+人口属性、情景、分组与起止时点，并完整保留V3批次{manifest['prior_process_batch_id']}的
+对话正文、动作、时点、资料路径和计数，仅补充逐轮回复处理用时估计。
+V2和V3来源本身均不是实际受试者或provider实测数据。
 基础作答使用原V2个人随机键复算：先从新版30题材料生成答案和最终选项，再独立分配实验组。
 同一生成规则用于两组，答题概率与决策抽样概率不读取实验组。
 没有按均分、组差或显著性选样，没有重试seed。
 两组对话与来源展示均为人工编写的过程示例，不是模型遵从率的实测结果。
 
-V3过程生成假设：{manifest['evidence_policy']}
+保留的V3过程生成假设：{manifest['evidence_policy']}
 独立对话seed：{manifest['dialogue_seed']}，逐人的原V2编号作随机键，首次抽样后不重试。
 起始可能未给事实、只给既往名额、只给每周可到场次数，或者已给全两项事实。
 A组只澄清缺少的事实，每轮最多一项，补齐即继续；已知条件不重复追问。
@@ -79,9 +81,18 @@ AI资料线索次数按实际模板回复中的明确来源卡片与对应eviden
 
 全部记录的is_synthetic=1、record_kind=synthetic、data_origin=synthetic、
 platform_analysis_eligible=0。所有日期与作答/对话/决策时长都是模拟值。
-actual_model_latency_ms、mean_reply_seconds均为null；没有reply_latency事件。
+actual_model_latency_ms仍为null；没有reply_latency实测事件，实际模型调用为0。
+AI回复用时来源reply_time_source=estimated，估算器{manifest['reply_time_estimator_version']}，
+估计seed为{manifest['reply_time_estimation_seed']}。{manifest['reply_time_estimation_rule']}
+每条assistant消息对应一项reply_time_estimates原始明细及reply_time_estimate事件，
+保存estimated_latency_ms、is_estimate=true、source=estimated、estimator_version、消息序号、
+回复字数与动作、原用户/AI消息时点及可用窗口，不更改既有消息时间戳。
+estimated_reply_ms为逐轮毫秒估计的算术均值，mean_reply_seconds为同均值折算秒并保留两位。
+逐轮估计共{manifest['reply_time_estimate_count']}项，范围{manifest['estimated_reply_range_ms']}毫秒，
+全体逐轮加权均值{manifest['estimated_reply_mean_seconds']}秒；逐记录平均值范围
+{manifest['record_mean_reply_seconds_range']}秒。这些值不能当作provider实测性能。
 synthetic_pretest_time_seconds为null；未记录前测起点，不补造前测时长。
-CSV中的JSON对象和数组以JSON文本存储，空白模型延迟单元格表示缺失，不是0秒。
+CSV中的JSON对象和数组以JSON文本存储，空白actual_model_latency_ms表示实测缺失，不是0秒。
 过程提醒按同一derive_process_alerts规则从逐题答案、时点及对话复算，
 每条保留触发规则、观测值、来源字段和模拟标记，不因分组或低分直接添加提醒。
 
@@ -90,6 +101,7 @@ CSV中的JSON对象和数组以JSON文本存储，空白模型延迟单元格表
 生成器版本：{manifest['generator_version']}
 生成seed：{manifest['generator_seed']}
 分组seed：{manifest['arm_seed']}
+V3原对话内容指纹：{manifest['prior_process_content_sha256']}
 冻结材料SHA256：{manifest['materials_sha256']}
 逐人记录SHA256：{manifest['records_sha256']}
 摘要算法：UTF-8 JSON，sort_keys=True，ensure_ascii=False，separators=(',', ':')。
@@ -166,9 +178,12 @@ def register_student_synthetic_exports(app: FastAPI, require_admin: Callable,
         manifest = get_student_dataset()["manifest"]
         return {"datasets": [{
             "id": BATCH_ID, "source_batch_id": BATCH_ID, "design_version": manifest["design_version"],
-            "label": "126条大学生合成数据（V3差异过程假设）", "is_synthetic": True,
+            "label": "126条大学生合成数据（V4回复用时估计）", "is_synthetic": True,
             "parent_source_batch_id": manifest["parent_source_batch_id"],
             "parent_profiles_sha256": manifest["parent_profiles_sha256"],
+            "prior_process_batch_id": manifest["prior_process_batch_id"],
+            "reply_time_source": manifest["reply_time_source"],
+            "reply_time_estimator_version": manifest["reply_time_estimator_version"],
             "data_origin": "synthetic", "record_kind": "synthetic",
             "platform_database_imported": None, "platform_database_inspected": False,
             "available": True, "verification_status": "deterministic_student_batch_frozen_materials",

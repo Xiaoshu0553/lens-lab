@@ -1,9 +1,9 @@
 """Independent university-only synthetic records for the isolated showcase.
 
-Nothing in this generator reads the legacy cross-age 600/126 rows. V3 preserves
-the V2 student profiles using their original random keys and independently
-varies the authored conversations. Seeds are fixed, never retried to obtain an
-intervention effect. These are not model output or observed participant data.
+Nothing here reads legacy cross-age 600/126 rows. V4 preserves V2 personal
+profiles and the V3 authored conversations, adding deterministic estimates of
+reply processing time. Seeds are fixed, never retried to obtain an intervention
+effect. These are not model output, measured latency, or participant data.
 """
 from __future__ import annotations
 
@@ -26,13 +26,21 @@ from .student_materials import (AGE_BANDS, DESIGN_VERSION, EDUCATION_STAGES,
                                 FORM_VERSION, form_for, score_form, task_for)
 
 
-BATCH_ID = "student-126-20261022-v3"
+BATCH_ID = "student-126-20261022-v4"
 PARENT_BATCH_ID = "student-126-20261022-v2"
-GENERATOR_VERSION = "student-independent-simulation-v3"
+PRIOR_PROCESS_BATCH_ID = "student-126-20261022-v3"
+GENERATOR_VERSION = "student-independent-simulation-v4"
 GENERATOR_SEED = "university-v1-independent-student-fixtures-20261022"
 ARM_SEED = "university-v1-arm-assignment-20261022"
 DIALOGUE_SEED = "student-dialogue-v3"
-RENDER_VERSION = "student-authored-dialogue-v3"
+RENDER_VERSION = "student-authored-dialogue-v4"
+REPLY_TIME_ESTIMATOR_VERSION = "student-reply-time-estimator-v1"
+REPLY_TIME_SEED = "student-reply-time-estimate-v1"
+REPLY_TIME_ESTIMATION_RULE = (
+    "展示用处理耗时估计：按回复字数、动作类型、固定个人seed及逐轮波动生成，"
+    "限于该轮已保存用户消息至AI回复的时间窗口内，最大8500毫秒。"
+    "均值按逐条assistant回复等权计算；不是provider实测耗时，也不包括完整轮次等待。"
+)
 RECORD_COUNT = 126
 PER_AGE = 42
 SCENARIOS = ("first_3", "first_1", "return_3", "return_1")
@@ -49,6 +57,8 @@ PARENT_PROFILE_FIELDS = (
     "group_id", "interaction_condition", "scenario_id", "decision_choice_id", "execution_choice_id",
     "decision_feasible", "decision_optimal", "score", "created_at", "decision_started_at", "ended_at",
 )
+PRIOR_PROCESS_FIELDS = ("fixture_dialogue_plan", "messages", "user_turns", "clarification_count",
+                        "evidence_reveals", "distinct_evidence_cards", "flags", "process_alert_details")
 EVIDENCE_POLICY = (
     "人工模拟假设：固定逐人seed生成A组每条2–8次、S组每条1–5次资料线索；"
     "按年龄兴趣权重选择来源，同一来源最多展示两次且不连续重复。"
@@ -58,15 +68,19 @@ EVIDENCE_POLICY = (
 )
 NOTICE = (
     "全部为126条18–25岁在读专科或本科大学生合成记录，不是真实受试者数据。"
-    "V3沿用V2合成个人资料与作答，仅重新编写对话过程。"
+    "V4沿用V2合成个人资料、作答及V3对话，仅添加AI逐轮处理耗时估计。"
     "对话为人工模板，未调用模型；日期、时长和身份均为模拟值，不进入正式分析。"
     "A组更多资料线索为人工设定的模拟假设，不代表真实干预效果。"
+    "AI平均回复用时为估计值，不是provider实测。"
 )
 
 PROVENANCE_COLUMNS = {
     "is_synthetic": "INTEGER NOT NULL DEFAULT 0",
     "data_origin": "TEXT", "dataset_variant": "TEXT", "source_batch_id": "TEXT",
     "parent_source_batch_id": "TEXT", "parent_record_id": "TEXT",
+    "prior_process_batch_id": "TEXT", "prior_process_record_id": "TEXT",
+    "reply_time_source": "TEXT", "reply_time_estimator_version": "TEXT", "estimated_reply_ms": "REAL",
+    "reply_time_estimates_json": "TEXT",
     "synthetic_source_json": "TEXT", "synthetic_pretest_time_seconds": "REAL",
     "timestamp_is_simulated": "INTEGER", "platform_analysis_eligible": "INTEGER",
     "fixture_conversation": "INTEGER NOT NULL DEFAULT 0", "fixture_render_version": "TEXT",
@@ -269,6 +283,46 @@ def _dialogue(row: dict, snapshot: dict) -> tuple[list[dict], list[dict]]:
     return messages, events
 
 
+def estimate_fixture_reply_times(row: dict, messages: list[dict]) -> list[dict]:
+    """Estimate each saved reply without moving any existing message timestamp.
+
+    The personal and turn factors only affect these timing estimates. In
+    particular, this RNG is never shared with dialogue, answers or assignment.
+    """
+    rng = _rng(REPLY_TIME_SEED, row["parent_record_id"])
+    personal_factor = rng.uniform(0.82, 1.22)
+    estimates = []
+    for index, message in enumerate(messages):
+        if message["role"] != "assistant":
+            continue
+        previous = messages[index - 1] if index else None
+        if not previous or previous["role"] != "user":
+            raise ValueError("回复耗时估计缺少该轮用户消息，不补造时间窗口")
+        available_ms = round((datetime.fromisoformat(message["created_at"])
+                              - datetime.fromisoformat(previous["created_at"])).total_seconds() * 1000)
+        if available_ms <= 0:
+            raise ValueError("回复耗时估计必须使用正的既有用户到回复时间窗口")
+        action, characters = message["action"], len(message["content"])
+        setup_ms = {"prompt_clarification": 450, "evidence": 650, "answer": 500}.get(action, 500)
+        per_character_ms = {"prompt_clarification": 18, "evidence": 15, "answer": 17}.get(action, 17)
+        estimated_ms = round((setup_ms + per_character_ms * characters) * personal_factor
+                             * rng.uniform(0.78, 1.24) + rng.uniform(50, 260))
+        estimated_ms = min(available_ms, max(400, min(8500, estimated_ms)))
+        estimates.append({
+            "estimated_latency_ms": estimated_ms, "source": "estimated", "is_estimate": True,
+            "estimator_version": REPLY_TIME_ESTIMATOR_VERSION,
+            "assistant_message_index": index + 1, "reply_index": len(estimates) + 1,
+            "reply_action": action, "reply_character_count": characters,
+            "user_message_created_at": previous["created_at"], "assistant_message_created_at": message["created_at"],
+            "available_window_ms": available_ms, "personal_factor": round(personal_factor, 8),
+            "is_synthetic": 1, "timestamp_is_simulated": 1,
+            "source_batch_id": BATCH_ID, "parent_source_batch_id": PARENT_BATCH_ID,
+            "parent_record_id": row["parent_record_id"], "prior_process_batch_id": PRIOR_PROCESS_BATCH_ID,
+            "conversation_source": "authored_template_not_model_output", "render_version": RENDER_VERSION,
+        })
+    return estimates
+
+
 @lru_cache(maxsize=1)
 def _generated_dataset() -> dict:
     if len(AGE_BANDS) != 3 or set(EDUCATION_STAGES) != {"college", "bachelor"}:
@@ -285,7 +339,7 @@ def _generated_dataset() -> dict:
         arm_indices = Counter()
         for index in range(PER_AGE):
             parent_id = f"SYNTH-STUDENT-V2-{age}-{index + 1:03d}"
-            record_id = f"SYNTH-STUDENT-V3-{age}-{index + 1:03d}"
+            record_id = f"SYNTH-STUDENT-V4-{age}-{index + 1:03d}"
             # Preserve the original V2 personal random key. Public V3 IDs must
             # not resample answers, decisions, demographics, or task timing.
             rng = _rng(GENERATOR_SEED, parent_id)
@@ -307,6 +361,8 @@ def _generated_dataset() -> dict:
             row = {
                 "id": record_id, "source_batch_id": BATCH_ID, "is_synthetic": 1,
                 "parent_source_batch_id": PARENT_BATCH_ID, "parent_record_id": parent_id,
+                "prior_process_batch_id": PRIOR_PROCESS_BATCH_ID,
+                "prior_process_record_id": f"SYNTH-STUDENT-V3-{age}-{index + 1:03d}",
                 "data_origin": "synthetic", "record_kind": "synthetic", "run_mode": "demo", "is_demo": 1,
                 "dataset_variant": GENERATOR_VERSION, "design_version": DESIGN_VERSION,
                 "platform_analysis_eligible": 0, "student_confirmed": 1,
@@ -339,6 +395,17 @@ def _generated_dataset() -> dict:
             row["parent_profile_sha256"] = _digest({key: row[key] for key in PARENT_PROFILE_FIELDS})
             row["fixture_dialogue_plan"] = _dialogue_plan(row)
             row["messages"], row["model_events"] = _dialogue(row, snapshot)
+            row["reply_time_estimates"] = estimate_fixture_reply_times(row, row["messages"])
+            row["model_events"].extend({"event_type": "reply_time_estimate", "detail": detail,
+                                         "created_at": detail["assistant_message_created_at"]}
+                                        for detail in row["reply_time_estimates"])
+            row["model_events"].sort(key=lambda event: event["created_at"])
+            latency_values = [detail["estimated_latency_ms"] for detail in row["reply_time_estimates"]]
+            row["reply_time_source"] = "estimated"
+            row["reply_time_sample_count"] = len(latency_values)
+            row["reply_time_estimator_version"] = REPLY_TIME_ESTIMATOR_VERSION
+            row["estimated_reply_ms"] = round(sum(latency_values) / len(latency_values), 2)
+            row["mean_reply_seconds"] = round(sum(latency_values) / len(latency_values) / 1000, 2)
             row["user_turns"] = sum(message["role"] == "user" for message in row["messages"])
             row["clarification_count"] = sum(message["action"] == "prompt_clarification" for message in row["messages"])
             row["evidence_reveals"] = sum(event["event_type"] == "evidence_reveal" for event in row["model_events"])
@@ -356,12 +423,18 @@ def _generated_dataset() -> dict:
                               if event["event_type"] == "evidence_reveal")
     parent_profiles = [{"parent_record_id": row["parent_record_id"],
                         **{key: row[key] for key in PARENT_PROFILE_FIELDS}} for row in records]
+    prior_process_profiles = [{"prior_process_record_id": row["prior_process_record_id"],
+                               "parent_record_id": row["parent_record_id"],
+                               **{key: row[key] for key in PRIOR_PROCESS_FIELDS}} for row in records]
+    estimated_latencies = [detail["estimated_latency_ms"] for row in records for detail in row["reply_time_estimates"]]
     manifest = {
         "source_batch_id": BATCH_ID, "design_version": DESIGN_VERSION, "form_version": FORM_VERSION,
         "generator_version": GENERATOR_VERSION, "generator_seed": GENERATOR_SEED, "arm_seed": ARM_SEED,
         "dialogue_seed": DIALOGUE_SEED, "parent_source_batch_id": PARENT_BATCH_ID,
         "parent_profile_fields": list(PARENT_PROFILE_FIELDS), "parent_profiles_sha256": _digest(parent_profiles),
         "parent_profiles_preserved": True, "personal_random_key_version": "SYNTH-STUDENT-V2",
+        "prior_process_batch_id": PRIOR_PROCESS_BATCH_ID, "prior_process_fields": list(PRIOR_PROCESS_FIELDS),
+        "prior_process_content_sha256": _digest(prior_process_profiles), "prior_process_content_preserved": True,
         "render_version": RENDER_VERSION, "record_count": len(records),
         "age_counts": dict(Counter(row["age_band"] for row in records)),
         "arm_counts": dict(Counter(row["group_id"] for row in records)),
@@ -372,7 +445,14 @@ def _generated_dataset() -> dict:
         "no_legacy_records_reused": True, "no_group_score_effect": True,
         "no_target_means_or_seed_retries": True, "timestamps_simulated": True,
         "actual_model_calls": 0, "actual_model_latency_ms": None,
-        "generation_rule": "preserve V2 student profiles with original V2 random keys; independently vary authored V3 dialogue; fixed seeds, no outcome calibration or seed retries",
+        "reply_time_source": "estimated", "reply_time_estimator_version": REPLY_TIME_ESTIMATOR_VERSION,
+        "reply_time_estimation_seed": REPLY_TIME_SEED, "reply_time_estimation_rule": REPLY_TIME_ESTIMATION_RULE,
+        "reply_time_estimate_count": len(estimated_latencies),
+        "estimated_reply_range_ms": [min(estimated_latencies), max(estimated_latencies)],
+        "estimated_reply_mean_seconds": round(sum(estimated_latencies) / len(estimated_latencies) / 1000, 2),
+        "record_mean_reply_seconds_range": [min(row["mean_reply_seconds"] for row in records),
+                                             max(row["mean_reply_seconds"] for row in records)],
+        "generation_rule": "preserve V2 profiles and V3 dialogue with their original random keys; add deterministic per-reply processing estimates; no actual provider latency or outcome calibration",
         "conversation_source": "authored_template_not_model_output",
         "evidence_policy": EVIDENCE_POLICY,
         "evidence_policy_is_simulated_assumption": True,
@@ -472,7 +552,9 @@ def seed_student_showcase(conn: sqlite3.Connection, settings, model_config_id: s
             "literacy_instrument_version", "age_band", "exact_age", "education_stage", "student_confirmed", "topic_familiarity",
             "created_at", "decision_started_at", "ended_at", "decision_choice_id", "execution_choice_id",
             "decision_feasible", "decision_optimal", "score", "scenario_id", "is_synthetic", "data_origin", "dataset_variant",
-            "source_batch_id", "parent_source_batch_id", "parent_record_id", "timestamp_is_simulated", "platform_analysis_eligible", "fixture_conversation", "fixture_render_version",
+            "source_batch_id", "parent_source_batch_id", "parent_record_id", "prior_process_batch_id", "prior_process_record_id",
+            "reply_time_source", "reply_time_estimator_version", "estimated_reply_ms",
+            "timestamp_is_simulated", "platform_analysis_eligible", "fixture_conversation", "fixture_render_version",
             "synthetic_pretest_time_seconds")}
         snapshot = dataset["frozen_materials"][source["age_band"]]["tasks"][source["scenario_id"]]
         selected = next(option for option in snapshot["decision_options"] if option["id"] == source["decision_choice_id"])
@@ -490,6 +572,7 @@ def seed_student_showcase(conn: sqlite3.Connection, settings, model_config_id: s
                        "reviewed_at": source["ended_at"], "score_note": "合成选择自动复算 student-decision-v1；非真实观测",
                        "flags_json": _json(source["flags"]),
                        "process_alert_details_json": _json(source["process_alert_details"]), "feedback_json": "{}"})
+        values["reply_time_estimates_json"] = _json(source["reply_time_estimates"])
         messages = [(source["id"], item["role"], item["content"], item["action"], item["created_at"]) for item in source["messages"]]
         events = [(source["id"], item["event_type"], _json(item["detail"]), item["created_at"]) for item in source["model_events"]]
         history = [(source["id"], "valid", "synthetic_fixture_only", "student-synthetic-generator", source["ended_at"])]

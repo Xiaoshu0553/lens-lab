@@ -36,6 +36,7 @@ from .outcomes import compare_conditions
 from .record_reporting import (ai_prompt_counts, ai_prompt_totals, automatic_analysis_reasons,
                                cohort_exclusion_reasons, record_times)
 from .process_alerts import derive_process_alerts
+from .reply_timing import aggregate_reply_timing, reply_timing
 from .model import (ANSWER_PROMPT_VERSION, CLARIFICATION_MARKER,
                     PROMPT_ONLY_VERSION, DemoProvider, LiveProvider, ModelError,
                     answer_system_prompt, prompt_only_system_prompt)
@@ -1025,20 +1026,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             literacy_distribution = [{"literacy_score": score, "group_id": group, "sessions": count}
                                      for (score, group), count in sorted(literacy_counts.items())]
             scored_groups = {row["id"]: row["group_id"] for row in scored}
-            latencies, evidence_counts = [], Counter()
+            events_by_session = {row["id"]: [] for row in scored}
+            evidence_counts = Counter()
             if scored_groups:
                 # Source counts and latency use the same completed IDs as outcomes.
                 for event in db.execute("SELECT session_id,event_type,detail_json FROM model_events ORDER BY id"):
                     if event["session_id"] not in scored_groups:
                         continue
+                    events_by_session[event["session_id"]].append(dict(event))
                     try:
                         detail = json.loads(event["detail_json"])
-                        if event["event_type"] == "reply_latency":
-                            latencies.append(detail["latency_ms"])
-                        elif event["event_type"] == "evidence_reveal":
+                        if event["event_type"] == "evidence_reveal":
                             evidence_counts[(detail["card_id"], scored_groups[event["session_id"]])] += 1
                     except (TypeError, ValueError, KeyError):
                         continue
+            timing = aggregate_reply_timing(reply_timing(row, events_by_session[row["id"]]) for row in scored)
             showcase_totals = showcase_record_totals(db)
             all_record_comparison = showcase_comparison(all_completed)
             if all_record_comparison is not None:
@@ -1076,7 +1078,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evidence_reveal_distribution": [
                     {"card_id": card_id, "group_id": group_id, "reveals": count}
                     for (card_id, group_id), count in sorted(evidence_counts.items())],
-                "mean_reply_seconds": round(sum(latencies) / len(latencies) / 1000, 2) if latencies else None}
+                **timing}
 
     @app.get("/api/admin/tasks")
     def admin_tasks(include_archived: bool = False, admin: str = Depends(require_admin)):
@@ -1210,6 +1212,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 record = {key: row[key] for key in fields}
                 record["id"] = record["record_id"] = aliases[row["id"]]
                 messages = _messages(db, row["id"])
+                record.update(reply_timing(row, db.execute(
+                    "SELECT event_type,detail_json FROM model_events WHERE session_id=? ORDER BY id", (row["id"],))))
                 record["process_alert_details"] = _record_process_alerts(row, messages)
                 task = json.loads(row["task_snapshot_json"])
                 reasons = analysis_reasons(row, active)
@@ -1337,9 +1341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record["evidence_reveals"] = sum(event["event_type"] == "evidence_reveal" for event in events)
             record["distinct_evidence_cards"] = len({json.loads(event["detail_json"])["card_id"]
                                                     for event in events if event["event_type"] == "evidence_reveal"})
-            reply_ms = [json.loads(event["detail_json"])["latency_ms"] for event in events
-                        if event["event_type"] == "reply_latency"]
-            record["mean_reply_seconds"] = round(sum(reply_ms) / len(reply_ms) / 1000, 2) if reply_ms else None
+            record.update(reply_timing(row, events))
             record["model_events_json"] = json.dumps(events, ensure_ascii=False)
             record["review_history_json"] = json.dumps([dict(e) for e in db.execute(
                 "SELECT status,reason,reviewer,created_at FROM review_history WHERE session_id=? ORDER BY id", (row["id"],)
