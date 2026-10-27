@@ -1,8 +1,8 @@
-"""Route participant questions to one frozen evidence card per turn.
+"""Route offline questions to one frozen evidence card per turn.
 
 The model may choose a card or a clarification slot, but its free-form text is
-never shown to participants. This keeps both experimental arms on the same
-information budget and prevents a single model reply from giving the decision.
+not shown by this legacy/offline path. Pilot/live dialogue bypasses this router
+and uses the model's answer with the full conversation history.
 """
 
 from __future__ import annotations
@@ -45,6 +45,25 @@ QUESTION_TOPICS = (
     ("论坛说法", ("论坛", "帖子"), ("论坛", "帖子")),
     ("自媒体说法", ("自媒体", "网文", "公众号"), ("自媒体", "网文", "公众号")),
 )
+
+
+ELIGIBILITY_TOPIC = (
+    "资格条件", ("资格", "条件", "门槛"), ("资格", "身份", "年龄", "在读阶段"),
+)
+
+
+def _eligibility_query(message: str) -> bool:
+    """Recognize a general eligibility request without swallowing a detail.
+
+    A new, unsupported subject (e.g. English requirements) must not retrieve
+    the basic identity/age rule just because it also contains “条件”.
+    """
+    return bool(re.search(r"资格|条件|门槛|(?:报名|申请|参加|参与)要求", message)
+                and re.fullmatch(
+                    r"(?:请|帮我|麻烦|我想|想|先|再|查证|核查|查询|查|查看|了解|看|说说|告诉我|一下"
+                    r"|的|本次|活动|这个|项目|报名|申请人|申请|参与|参加|基本|具体|所有|什么|哪些|有|是|要|需要|需"
+                    r"|满足|具备|资格|条件|要求|门槛|如何|怎样|怎么|啥|吗|呢|啊|[，。？！,.?!：:])+",
+                    message))
 
 
 def _submission_channel_query(message: str):
@@ -96,7 +115,9 @@ def _question_topic(message: str):
     if (any(entry[2][0] == "文件格式" for entry in concrete)
             and all(entry[2][0] in {"材料", "文件格式"} for entry in concrete)):
         return next(entry[2] for entry in concrete if entry[2][0] == "文件格式")
-    return _detail_topic(min(concrete or matches)[2], compact) if matches else None
+    if matches:
+        return _detail_topic(min(concrete or matches)[2], compact)
+    return ELIGIBILITY_TOPIC if _eligibility_query(compact) else None
 
 
 def _detail_topic(topic: tuple, message: str) -> tuple:
@@ -113,8 +134,29 @@ def _detail_topic(topic: tuple, message: str) -> tuple:
     return topic
 
 
+def _selected_menu_topic(history: list[dict]) -> tuple[str, tuple] | None:
+    # Resolve only the immediately preceding menu that this application
+    # actually offered. A bare ordinal must never select a hidden decision
+    # option, inherit an expired menu, or turn into a case fact.
+    if (len(history) >= 2 and history[-1]["role"] == "user"
+            and history[-2]["role"] == "assistant"
+            and history[-2]["content"].strip() in {overview_reply(), broad_reply()}):
+        selection = re.fullmatch(
+            r"(?:我)?(?:想要|想|要)?(?:先)?(?:选择|选|查证|核查|查询|了解|看看|看|查)?"
+            r"(?:一下)?第?([一二三123])(?:个|项)?(?:吧|呢)?[。？！.!?]*",
+            re.sub(r"\s+", "", history[-1]["content"]),
+        )
+        if selection:
+            subject = {"一": "资格条件", "1": "资格条件", "二": "所需材料",
+                       "2": "所需材料", "三": "截止时间", "3": "截止时间"}[selection[1]]
+            return subject, _question_topic(subject)
+    return None
+
+
 def _question_context(history: list[dict]) -> tuple[str, tuple | None]:
     latest = next(item["content"] for item in reversed(history) if item["role"] == "user")
+    if selection := _selected_menu_topic(history):
+        return latest + "\n本轮所选菜单主题：" + selection[0], selection[1]
     topic = _question_topic(latest)
     # Facts supplied alongside an eligibility question are not a request for
     # that fact's rule. They must not hide the actual request behind a topic.
@@ -127,9 +169,11 @@ def _question_context(history: list[dict]) -> tuple[str, tuple | None]:
     followup = re.sub(r"\s+", "", latest)
     elliptical = r"(?:那|这|这个|这项|它|具体|最低|最少|最多|最迟|最晚|究竟|到底|还|又|就|要|需要|必须|能|可以|是|的|填|交|补|多少|几|点|个|次|份|再说一遍|重复一下|吗|呢|啊|[零一二两三四五六七八九十0-9，。？！,.?!])+"
     if len(followup) <= 30 and re.fullmatch(elliptical, followup):
-        users = [item["content"] for item in history if item["role"] == "user"]
-        for earlier in reversed(users[:-1]):
+        users = [(index, item["content"]) for index, item in enumerate(history) if item["role"] == "user"]
+        for index, earlier in reversed(users[:-1]):
             earlier_topic = _question_topic(earlier)
+            if earlier_topic is None and (selection := _selected_menu_topic(history[:index + 1])):
+                earlier, earlier_topic = selection
             if earlier_topic:
                 return latest + "\n此前所问主题：" + earlier, _detail_topic(earlier_topic, latest)
             if not re.fullmatch(elliptical, re.sub(r"\s+", "", earlier)):
@@ -236,6 +280,8 @@ def asks_for_decision(message: str) -> bool:
 
 def asks_for_overview(message: str) -> bool:
     compact = re.sub(r"\s+", "", message.lower())
+    if _eligibility_query(compact):
+        return False
     general = re.sub(r"[，。？！,.?!]", "", compact)
     if re.fullmatch(r"(?:报名|申请|这个|这项|本次|的|有|要|需要|满足|具备|哪些|什么|啥|怎样|怎么|资格|条件|要求|门槛|吗|呢|啊)+", general):
         return True

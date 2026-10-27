@@ -74,7 +74,8 @@ def test_unknown_subject_cannot_use_a_valid_id_or_jump_over_the_previous_questio
 
 
 def test_colloquial_general_question_is_guided_without_swallowing_a_specific_subject():
-    assert asks_for_overview("报名要啥条件？")
+    assert not asks_for_overview("报名要啥条件？")
+    assert asks_for_overview("怎么办理？")
     assert not asks_for_overview("绩点门槛？")
     assert not asks_for_overview("最低学历要求？")
 
