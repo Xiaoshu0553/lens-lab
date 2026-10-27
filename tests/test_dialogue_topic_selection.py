@@ -54,6 +54,7 @@ def test_ordinal_answer_uses_the_assistants_explicit_topic_menu(menu, message, c
 
 @pytest.mark.parametrize("message", [
     "资格条件里的绩点要求是多少？", "申请条件里的英语门槛是什么？",
+    "资格" + "需要" * 1000 + "英语",
 ])
 def test_eligibility_word_does_not_replace_an_uncovered_specific_subject(message):
     route = _route(message)

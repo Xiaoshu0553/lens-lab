@@ -58,12 +58,17 @@ def _eligibility_query(message: str) -> bool:
     A new, unsupported subject (e.g. English requirements) must not retrieve
     the basic identity/age rule just because it also contains “条件”.
     """
-    return bool(re.search(r"资格|条件|门槛|(?:报名|申请|参加|参与)要求", message)
-                and re.fullmatch(
-                    r"(?:请|帮我|麻烦|我想|想|先|再|查证|核查|查询|查|查看|了解|看|说说|告诉我|一下"
-                    r"|的|本次|活动|这个|项目|报名|申请人|申请|参与|参加|基本|具体|所有|什么|哪些|有|是|要|需要|需"
-                    r"|满足|具备|资格|条件|要求|门槛|如何|怎样|怎么|啥|吗|呢|啊|[，。？！,.?!：:])+",
-                    message))
+    if not re.search(r"资格|条件|门槛|(?:报名|申请|参加|参与)要求", message):
+        return False
+    # Consume known phrasing once, rather than backtracking across repeated
+    # overlapping words such as “需要/需/要” in an unrecognized long message.
+    remainder = re.sub(
+        r"请|帮我|麻烦|我想|想|先|再|查证|核查|查询|查|查看|了解|看|说说|告诉我|一下"
+        r"|的|本次|活动|这个|项目|报名|申请人|申请|参与|参加|基本|具体|所有|什么|哪些|有|是|需要|要求|需|要"
+        r"|满足|具备|资格|条件|门槛|如何|怎样|怎么|啥|吗|呢|啊|[，。？！,.?!：:]",
+        "", message,
+    )
+    return not remainder
 
 
 def _submission_channel_query(message: str):
