@@ -5,10 +5,14 @@
   const prefix = document.body.dataset.apiPrefix || "";
   const storageKey = `lens-translation-v1:${preview ? "preview" : "participant"}:${prefix}`;
   let saved = {}; try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { /* Fresh state after damaged browser storage. */ }
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) saved = {};
+  const answerMap = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
   let info = null, form = null, view = null, page = 0, busy = false, draftTimer = null, saveChain = Promise.resolve();
-  let answers = saved.answers || {}, selfAnswers = saved.selfAnswers || {}, messageRequest = saved.messageRequest || null, startRequest = saved.startRequest || null;
+  let answers = answerMap(saved.answers), selfAnswers = answerMap(saved.selfAnswers), messageRequest = saved.messageRequest || null, startRequest = saved.startRequest || null;
   if (startRequest?.signature) { try { const signature = JSON.parse(startRequest.signature); delete signature.access_code; startRequest.signature = JSON.stringify(signature); } catch (_) { startRequest = null; } }
   let displayedMessageKey = "", displayedMaterialKey = "", countdownBase = null, starting = false, pollTimer = null, pollCount = 0;
+  let movingPage = false, validationAttempted = false;
+  const pageSize = 5;
   const uuid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const writeSaved = () => {
     saved = {...saved, answers, selfAnswers, messageRequest, startRequest};
@@ -36,51 +40,123 @@
     for (const id of ["intake-panel", "form-panel", "task-panel", "done-panel", "recovery-panel"]) $(id).hidden = id !== name;
     const step = name === "form-panel" || name === "intake-panel" ? 1 : name === "task-panel" ? 2 : 3;
     for (let i = 1; i <= 3; i++) { $("step-" + i).classList.toggle("active", i === step); $("step-" + i).classList.toggle("completed", i < step); }
+    saved.stage = name === "form-panel" ? "form" : name === "intake-panel" ? "intake" : name;
+    if (name === "form-panel") saved.formPage = page;
+    writeSaved();
   }
   function intakeReady() {
     return Boolean(["age-band", "education-stage", "translation-experience"].every(id => $(id).value) && $("university-confirmed").checked && $("consent").checked && (preview || !info?.access_code_required || $("access-code").value.trim()) && !!form && (preview || info?.study_mode !== "live" || info.ready));
   }
   function updateIntake() {
     $("begin-form").disabled = !intakeReady();
-    saved.intake = {age_band: $("age-band").value, education_stage: $("education-stage").value, translation_experience: $("translation-experience").value};
+    saved.intake = {age_band: $("age-band").value, education_stage: $("education-stage").value, translation_experience: $("translation-experience").value, university_confirmed: $("university-confirmed").checked, consent: $("consent").checked};
     writeSaved();
   }
   function questionItems() {
     return [...form.items.map(item => ({...item, self: false})), ...(form.self_items || []).map(item => ({...item, self: true}))];
   }
+  const hasAnswer = item => {
+    const value = (item.self ? selfAnswers : answers)[item.id];
+    return Number.isInteger(value) && value >= 0 && value < item.options.length;
+  };
+  function currentItems() { return questionItems().slice(page * pageSize, (page + 1) * pageSize); }
+  function missingItems() { return currentItems().filter(item => !hasAnswer(item)); }
+  function missingCopy(missing) {
+    const numbers = missing.map(item => questionItems().findIndex(candidate => candidate.id === item.id) + 1);
+    return `本页还有 ${missing.length} 题未作答：第 ${numbers.join("、")} 题。请选择后再继续。`;
+  }
+  function syncVisibleAnswers() {
+    // Native browser restoration may change checked states without a change event.
+    // Read the actual visible choices before validation or leaving the page.
+    const items = new Map(currentItems().map(item => [item.id, item]));
+    let changed = false;
+    for (const field of $("form-items").children) {
+      const item = items.get(field.dataset.questionId); if (!item) continue;
+      const selected = Array.from(field.querySelectorAll("input")).find(input => input.type === "radio" && input.name === `translation-${item.id}` && input.checked);
+      const map = item.self ? selfAnswers : answers, value = selected ? Number(selected.value) : null;
+      if (Number.isInteger(value) && value >= 0 && value < item.options.length) {
+        if (map[item.id] !== value) { map[item.id] = value; changed = true; }
+      } else if (Object.hasOwn(map, item.id)) { delete map[item.id]; changed = true; }
+    }
+    if (changed) startRequest = null;
+    saved.formPage = page;
+    writeSaved();
+    return missingItems();
+  }
+  function updateValidationFeedback() {
+    const missing = missingItems(), ids = new Set(missing.map(item => item.id));
+    for (const field of $("form-items").children) {
+      const invalid = validationAttempted && ids.has(field.dataset.questionId);
+      field.classList.toggle("unanswered", invalid); field.setAttribute("aria-invalid", String(invalid));
+      const message = field.querySelector(".question-error");
+      if (message) { message.hidden = !invalid; message.textContent = invalid ? `第 ${field.dataset.questionNumber} 题尚未作答，请选择一个选项。` : ""; }
+    }
+    if (validationAttempted) $("form-error").textContent = missing.length ? missingCopy(missing) : "";
+  }
   function renderForm() {
-    const items = questionItems(), totalPages = Math.ceil(items.length / 5), selected = items.filter(item => Object.hasOwn(item.self ? selfAnswers : answers, item.id)).length;
-    $("form-progress").textContent = `${selected} / ${items.length} 已作答`;
-    $("form-meter").max = items.length; $("form-meter").value = selected;
+    const items = questionItems(), totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    page = Math.min(Math.max(0, Number.isInteger(page) ? page : 0), totalPages - 1);
     $("form-items").replaceChildren();
-    items.slice(page * 5, page * 5 + 5).forEach((item, index) => {
-      const fieldset = document.createElement("fieldset"); fieldset.className = "question"; fieldset.dataset.questionId = item.id;
-      const legend = document.createElement("legend"); legend.textContent = `${page * 5 + index + 1}. ${item.stem}`;
+    currentItems().forEach((item, index) => {
+      const number = page * pageSize + index + 1;
+      const fieldset = document.createElement("fieldset"); fieldset.className = "question"; fieldset.dataset.questionId = item.id; fieldset.dataset.questionNumber = String(number);
+      const legend = document.createElement("legend"); legend.textContent = `${number}. ${item.stem}`;
       const domain = document.createElement("span"); domain.className = "question-domain"; domain.textContent = item.self ? "实践自评 · 单独记录" : item.domain || "翻译判断"; legend.append(domain); fieldset.append(legend);
+      const errorId = `question-${item.id}-error`;
       item.options.forEach((option, value) => {
         const label = document.createElement("label"); label.className = "question-option";
-        const input = document.createElement("input"); input.type = "radio"; input.name = `translation-${item.id}`; input.value = value; input.checked = (item.self ? selfAnswers : answers)[item.id] === value;
-        input.addEventListener("change", () => { (item.self ? selfAnswers : answers)[item.id] = value; fieldset.classList.remove("unanswered"); startRequest = null; writeSaved(); renderProgress(); });
+        const input = document.createElement("input"); input.type = "radio"; input.name = `translation-${item.id}`; input.value = String(value); input.checked = hasAnswer(item) && (item.self ? selfAnswers : answers)[item.id] === value;
+        input.setAttribute("aria-describedby", errorId);
+        const onChoice = () => { syncVisibleAnswers(); renderProgress(); updateValidationFeedback(); };
+        input.addEventListener("input", onChoice); input.addEventListener("change", onChoice);
         const content = document.createElement("span"); content.textContent = typeof option === "string" ? option : option.text || option.label || String(option);
         label.append(input, content); fieldset.append(label);
-      }); $("form-items").append(fieldset);
+      });
+      const error = document.createElement("p"); error.id = errorId; error.className = "question-error"; error.hidden = true; fieldset.append(error);
+      $("form-items").append(fieldset);
     });
-    $("form-page").textContent = `第 ${page + 1} / ${totalPages} 页`; $("form-prev").disabled = page === 0; $("form-next").hidden = page === totalPages - 1; $("start-task").hidden = page !== totalPages - 1;
+    $("form-page").textContent = `第 ${page + 1} / ${totalPages} 页`; $("form-prev").disabled = page === 0 || starting; $("form-next").hidden = page === totalPages - 1; $("start-task").hidden = page !== totalPages - 1;
+    saved.formPage = page; writeSaved(); renderProgress(); updateValidationFeedback();
   }
   function renderProgress() {
-    const items = questionItems(), completed = items.filter(item => Object.hasOwn(item.self ? selfAnswers : answers, item.id)).length;
-    $("form-progress").textContent = `${completed} / ${items.length} 已作答`; $("form-meter").value = completed;
+    const items = questionItems(), completed = items.filter(hasAnswer).length, local = currentItems();
+    $("form-progress").textContent = `${completed} / ${items.length} 已作答`; $("form-meter").max = items.length; $("form-meter").value = completed;
+    const answered = local.filter(hasAnswer).length;
+    $("form-page-status").textContent = `本页已答 ${answered} / ${local.length} 题${answered === local.length ? "，可以继续" : ""}`;
   }
   function validatePage() {
-    const missing = questionItems().slice(page * 5, page * 5 + 5).filter(item => !Object.hasOwn(item.self ? selfAnswers : answers, item.id));
+    const missing = syncVisibleAnswers(); renderProgress(); validationAttempted = true; updateValidationFeedback();
     if (!missing.length) return true;
-    for (const field of $("form-items").children) field.classList.toggle("unanswered", missing.some(item => item.id === field.dataset.questionId));
-    $("form-error").textContent = "请完成本页所有题目后继续。"; $("form-items").querySelector(".unanswered input")?.focus(); return false;
+    const first = Array.from($("form-items").children).find(field => field.dataset.questionId === missing[0].id);
+    first?.scrollIntoView({block: "center", behavior: "auto"}); first?.querySelector("input")?.focus({preventScroll: true});
+    return false;
+  }
+  function movePage(direction) {
+    if (movingPage || starting || (direction !== 1 && direction !== -1)) return false;
+    movingPage = true;
+    try {
+      const last = Math.max(0, Math.ceil(questionItems().length / pageSize) - 1), target = page + direction;
+      if (target < 0 || target > last) return false;
+      if (direction === 1) { if (!validatePage()) return false; } else syncVisibleAnswers();
+      page = target; validationAttempted = false; $("form-error").textContent = "";
+      saved.stage = "form"; renderForm(); $("form-heading").focus();
+      return true;
+    } finally { movingPage = false; }
+  }
+  function restoreFormPage() {
+    const items = questionItems(), firstMissing = items.findIndex(item => !hasAnswer(item));
+    const last = Math.max(0, Math.ceil(items.length / pageSize) - 1);
+    page = Number.isInteger(saved.formPage) ? Math.min(Math.max(saved.formPage, 0), last) : firstMissing < 0 ? last : Math.floor(firstMissing / pageSize);
+    validationAttempted = false; showPanel("form-panel"); renderForm();
   }
   async function start() {
     if (starting || !validatePage()) return;
-    const missing = questionItems().find(item => !Object.hasOwn(item.self ? selfAnswers : answers, item.id));
-    if (missing) { page = Math.floor(questionItems().indexOf(missing) / 5); renderForm(); validatePage(); return; }
+    const items = questionItems(), missingIndex = items.findIndex(item => !hasAnswer(item));
+    if (missingIndex >= 0) { page = Math.floor(missingIndex / pageSize); validationAttempted = false; renderForm(); validatePage(); return; }
+    if (!intakeReady()) {
+      saved.formPage = page; showPanel("intake-panel"); $("global-status").textContent = "问卷答案已保留。请核对参加信息、勾选确认，并在需要时重新填写邀请码；继续后将返回当前问卷页。";
+      $("intake-panel").scrollIntoView({block: "start"}); return;
+    }
     starting = true; $("start-task").disabled = true; $("form-error").textContent = "";
     const payload = {consent: true, university_confirmed: true, age_band: $("age-band").value, education_stage: $("education-stage").value, translation_experience: Number($("translation-experience").value), pretest_version: form.version, answers, self_answers: selfAnswers, access_code: $("access-code").value, researcher_preview: preview};
     if (preview && $("preview-condition").value) payload.preview_condition = $("preview-condition").value;
@@ -224,30 +300,35 @@
     finally { busy = false; updateControls(); }
   }
   function resetLocal() { clearTimeout(draftTimer); clearTimeout(pollTimer); pollTimer = null; pollCount = 0; saved = {}; view = null; answers = {}; selfAnswers = {}; page = 0; messageRequest = null; startRequest = null; displayedMessageKey = ""; writeSaved(); $("draft-input").value = ""; $("message-input").value = ""; $("consent").checked = false; $("university-confirmed").checked = false; updateIntake(); showPanel("intake-panel"); }
-  $("begin-form").addEventListener("click", () => { if (intakeReady()) { showPanel("form-panel"); renderForm(); $("form-heading").focus(); } });
+  $("begin-form").addEventListener("click", () => { if (intakeReady()) { updateIntake(); restoreFormPage(); $("global-status").textContent = ""; $("form-heading").focus(); } });
   for (const id of ["age-band", "education-stage", "translation-experience", "university-confirmed", "consent", "access-code"]) $(id).addEventListener("input", updateIntake);
-  $("form-prev").addEventListener("click", () => { page = Math.max(0, page - 1); $("form-error").textContent = ""; renderForm(); $("form-heading").focus(); });
-  $("form-next").addEventListener("click", () => { if (!validatePage()) return; page++; $("form-error").textContent = ""; renderForm(); $("form-heading").focus(); });
+  $("form-prev").addEventListener("click", () => movePage(-1));
+  $("form-next").addEventListener("click", () => movePage(1));
+  $("form-return-intake").addEventListener("click", () => { syncVisibleAnswers(); showPanel("intake-panel"); $("intake-panel").scrollIntoView({block: "start"}); });
   $("restore-local-draft").addEventListener("click", () => { if (saved.draftConflict?.sessionId === view?.id && !view?.ended_at) { $("draft-input").value = saved.draftConflict.text; draftChanged(); $("draft-input").focus(); } });
   $("start-task").addEventListener("click", start); $("chat-form").addEventListener("submit", send); $("draft-input").addEventListener("input", draftChanged); $("submit-button").addEventListener("click", submit);
   $("message-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); $("chat-form").requestSubmit(); } });
   $("withdraw-button").addEventListener("click", withdraw); $("done-withdraw").addEventListener("click", withdraw); $("recover-button").addEventListener("click", recover); $("sync-button").addEventListener("click", recover);
   $("discard-local").addEventListener("click", () => { if (window.confirm("只移除本标签页的会话连接？服务器记录仍会保留。若要删除记录，请先重新连接。")) { resetLocal(); $("global-error").textContent = ""; } });
   $("new-session").addEventListener("click", resetLocal); setInterval(updateClock, 1000);
-  window.addEventListener("beforeunload", () => { if (view && !view.ended_at) { saved.draft = $("draft-input").value; saved.draftSessionId = view.id; writeSaved(); } });
+  window.addEventListener("beforeunload", () => { if (saved.stage === "form" && form) syncVisibleAnswers(); if (view && !view.ended_at) { saved.draft = $("draft-input").value; saved.draftSessionId = view.id; writeSaved(); } });
   async function init() {
     try {
       [info, form] = await Promise.all([api("/api/translation/info"), api("/api/translation/form")]);
-      if (saved.formVersion && saved.formVersion !== form.version) { answers = {}; selfAnswers = {}; startRequest = null; }
+      if (saved.formVersion && saved.formVersion !== form.version) { answers = {}; selfAnswers = {}; startRequest = null; delete saved.formPage; saved.stage = "intake"; }
       saved.formVersion = form.version; writeSaved();
-      if (saved.intake) { $("age-band").value = saved.intake.age_band || ""; $("education-stage").value = saved.intake.education_stage || ""; $("translation-experience").value = saved.intake.translation_experience || ""; }
+      if (saved.intake) { $("age-band").value = saved.intake.age_band || ""; $("education-stage").value = saved.intake.education_stage || ""; $("translation-experience").value = saved.intake.translation_experience || ""; $("university-confirmed").checked = saved.intake.university_confirmed === true; $("consent").checked = saved.intake.consent === true; }
       $("preview-controls").hidden = !preview; $("access-code-label").hidden = !info.access_code_required || preview;
       if (info.study_mode === "demo") { $("mode-banner").hidden = false; $("mode-banner").textContent = "演示模式 · AI 对话由内置规则模拟，不调用真实模型，也不生成译文质量评分。本次数据不能作为实证结果。"; }
       else if (info.study_mode === "pilot") { $("mode-banner").hidden = false; $("mode-banner").textContent = "预测试模式 · 对话将请求所配置的模型 API。使用候选研究材料，当前仅比较直接翻译与主动澄清。"; }
       else if (!info.ready) { $("mode-banner").hidden = false; $("mode-banner").classList.add("warning"); $("mode-banner").textContent = preview ? "正式实验材料尚未冻结。研究者仍可试跑，试跑记录不进入参与者统计。" : "正式实验材料尚未冻结，当前暂不开放新任务。请联系研究者。"; }
       else { $("mode-banner").hidden = false; $("mode-banner").textContent = "正式实验模式 · 当前材料已冻结，对话将请求所配置的模型 API。"; }
       if (info.study_mode !== "demo") { $("mode-banner").hidden = false; $("mode-banner").textContent += (info.model_api_verified ? " 本进程已记录成功 API 调用。" : " 本进程尚未记录成功 API 调用；配置存在不等于连通成功。"); }
-      $("global-status").textContent = ""; updateIntake(); if (saved.sessionId) await recover(); else showPanel("intake-panel");
+      const resumeForm = saved.stage === "form" || (!saved.stage && !!saved.intake && questionItems().some(hasAnswer));
+      $("global-status").textContent = ""; updateIntake();
+      if (saved.sessionId) await recover();
+      else if (resumeForm) { restoreFormPage(); $("global-status").textContent = `已恢复问卷第 ${page + 1} 页及已选答案；尚未创建研究会话。`; }
+      else showPanel("intake-panel");
     } catch (error) { $("global-error").textContent = textError(error) + " 请刷新页面重试。"; $("global-status").textContent = ""; }
   }
   init();
