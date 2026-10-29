@@ -15,7 +15,7 @@ DESIGN_VERSION = "translation-equity-baseline-v2"
 FORM_VERSION = "translation-literacy-candidate-v1-18"
 TASK_VERSION = "bell-house-en-zh-v1"
 RUBRIC_VERSION = "translation-rubric-candidate-v1"
-PROMPT_VERSION = "translation-dialogue-v2"
+PROMPT_VERSION = "translation-dialogue-v3"
 OPTIMIZER_VERSION = "translation-scaffold-v1"
 MATERIAL_STATUS = "候选研究材料：问卷、能力阈值、任务及评分量规需经专家审查和预测试后冻结；软件与演示不构成效应证据。"
 

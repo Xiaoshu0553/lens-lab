@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK
+from app.translation_model import ACTIVE_CLARIFICATION_POLICY, dialogue_message_protocol, dialogue_prompt
 from app.translation_quality import RUBRIC
 from test_flow import auth, settings
 from translation_multi_model_helpers import configure_panel
@@ -114,6 +115,38 @@ def test_baseline_clarification_never_calls_optimizer_or_reads_hidden_answers(tm
     assert set(materials["policies"]) == {"S", "A"}
     assert "optimizer_prompt" not in materials and "optimizer" not in materials["versions"]
     assert not _record(client, sid)["events"][-1].get("optimizer")
+
+
+def test_dialogue_wire_order_is_frozen_and_only_active_adds_a_trailing_system_reminder(tmp_path):
+    for condition in ("S", "A"):
+        location = tmp_path / condition
+        location.mkdir()
+        app = create_app(settings(location, "pilot"))
+        provider = RecordingProvider()
+        client = TestClient(app)
+        app.state.translation_provider = provider
+        sid = _start(client, condition)
+        first_text = "请帮助完成这段小说的翻译。"
+        second_text = "我明确无法再补充背景，请据已知信息给完整译文。"
+        assert _message(client, sid, content=first_text).status_code == 200
+        first_record = _record(client, sid)
+        assert _message(client, sid, content=second_text).status_code == 200
+        wire = provider.calls[1]["messages"]
+        original_history = [{key: message[key] for key in ("role", "content")}
+                            for message in first_record["messages"]] + [{"role": "user", "content": second_text}]
+        protocol = first_record["material_snapshot"]["message_protocol"]
+        assert protocol == dialogue_message_protocol()
+        assert wire == [{"role": "system", "content": dialogue_prompt(TASK, condition)}] + original_history + protocol["conditions"][condition]["trailing_messages"]
+        if condition == "A":
+            assert wire[-1] == {"role": "system", "content": ACTIVE_CLARIFICATION_POLICY}
+        else:
+            assert wire[-1] == original_history[-1]
+        latest = _record(client, sid)
+        assert len(latest["messages"]) == 4
+        assert all(message["role"] in {"user", "assistant"} for message in latest["messages"])
+        materials = client.get("/api/admin/translation/materials", headers=auth()).json()
+        assert materials["message_protocol"] == protocol
+        assert materials["versions"]["prompt"] == "translation-dialogue-v3"
 
 
 def test_five_judges_receive_same_blind_submission_and_frozen_common_background(tmp_path):

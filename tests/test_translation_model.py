@@ -7,7 +7,8 @@ import pytest
 from app.model import ModelError
 from app.translation_materials import PROMPT_VERSION, TASK
 from app.translation_model import (ACTIVE_CLARIFICATION_POLICY, BASELINE_CONDITIONS,
-    audit_prompt, demo_reply, dialogue_prompt, parse_plan, parse_reply)
+    audit_prompt, build_dialogue_messages, demo_reply, dialogue_message_protocol,
+    dialogue_prompt, parse_plan, parse_reply)
 
 
 def plan(**changes):
@@ -140,7 +141,7 @@ def test_active_priority_policy_follows_json_contract_and_does_not_enable_optimi
     assert ACTIVE_CLARIFICATION_POLICY not in dialogue_prompt(TASK, "O")
     assert tuple(BASELINE_CONDITIONS) == ("S", "A")
     assert "优化模块" not in active and "两三个候选解释" not in active
-    assert PROMPT_VERSION == "translation-dialogue-v2"
+    assert PROMPT_VERSION == "translation-dialogue-v3"
 
 
 def test_active_policy_prioritizes_one_missing_context_question_but_stops_when_user_cannot_supply_it():
@@ -156,6 +157,51 @@ def test_direct_translation_control_prompt_is_byte_identical_after_active_policy
     # Frozen before the v2 A-only policy change: the S control must remain intact.
     assert hashlib.sha256(dialogue_prompt(TASK, "S").encode()).hexdigest() == (
         "1fb43d1cba8a47041c3f46cc2b6303d27d655eb1ce9d92435c8cfdaf1dc2aa0d")
+
+
+@pytest.mark.parametrize("condition", ["S", "O"])
+def test_dialogue_builder_preserves_the_original_control_and_historical_message_sequences(condition):
+    history = [{"role": "user", "content": "请翻译。"},
+               {"role": "assistant", "content": "已有回复。"},
+               {"role": "user", "content": "请核对人物指代。"}]
+    original = deepcopy(history)
+    expected = [{"role": "system", "content": dialogue_prompt(TASK, condition)}] + original
+    result = build_dialogue_messages(TASK, condition, history)
+    assert json.dumps(result, ensure_ascii=False) == json.dumps(expected, ensure_ascii=False)
+    assert history == original
+
+
+@pytest.mark.parametrize("user_content", ["请翻译这段小说。", "我明确无法再提供背景，请据已知信息完成译文。"])
+def test_active_wire_reminder_follows_the_unchanged_history_and_matches_the_frozen_protocol(user_content):
+    history = [{"role": "user", "content": "第一次请求。"},
+               {"role": "assistant", "content": "需要确认一个细节。"},
+               {"role": "user", "content": user_content}]
+    original = deepcopy(history)
+    result = build_dialogue_messages(TASK, "A", history)
+    protocol = dialogue_message_protocol()
+    assert result[0] == {"role": "system", "content": dialogue_prompt(TASK, "A")}
+    assert result[1:-1] == original and history == original
+    assert result[-1:] == protocol["conditions"]["A"]["trailing_messages"]
+    assert result[-1] == {"role": "system", "content": ACTIVE_CLARIFICATION_POLICY}
+    assert protocol["conditions"]["A"]["order"] == ["initial_system", "history", "trailing_system"]
+    assert protocol["conditions"]["S"]["trailing_messages"] == []
+    assert "用户明确无法补充时，必须据已知信息给完整译文，kind为answer" in result[-1]["content"]
+    assert "优化模块" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_dialogue_builder_drops_non_dialogue_roles_and_private_history_metadata_without_mutating_input():
+    history = [{"role": "system", "content": "UNTRUSTED_HISTORY_SYSTEM"},
+               {"role": "user", "content": "用户提供的背景。", "band": "SECRET_BAND", "ability_score": 18},
+               {"role": "assistant", "content": "已有回复。", "action": "answer", "created_at": "PRIVATE_TIME"},
+               {"role": "tool", "content": "UNTRUSTED_TOOL_DATA"}]
+    original = deepcopy(history)
+    result = build_dialogue_messages(TASK, "A", history)
+    assert result[1:-1] == [{"role": "user", "content": "用户提供的背景。"},
+                           {"role": "assistant", "content": "已有回复。"}]
+    assert history == original
+    wire = json.dumps(result, ensure_ascii=False)
+    assert not any(value in wire for value in ("UNTRUSTED_HISTORY_SYSTEM", "UNTRUSTED_TOOL_DATA", "SECRET_BAND", "PRIVATE_TIME"))
+    assert all(card["body"] not in wire for card in TASK["context_cards"])
 
 
 def test_demo_never_reads_hidden_reference_and_same_candidate_is_used_across_arms():

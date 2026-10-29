@@ -60,6 +60,34 @@ def dialogue_prompt(task: dict, condition: str, plan: dict | None = None) -> str
     return prompt
 
 
+def dialogue_message_protocol() -> dict:
+    """Freeze wire placement as well as policy wording for the baseline arms."""
+    return {
+        "version": "translation-message-order-v1",
+        "history_roles": ["user", "assistant"],
+        "history_fields": ["role", "content"],
+        "conditions": {
+            "S": {"order": ["initial_system", "history"], "trailing_messages": []},
+            "A": {"order": ["initial_system", "history", "trailing_system"],
+                  "trailing_messages": [{"role": "system", "content": ACTIVE_CLARIFICATION_POLICY}]},
+        },
+    }
+
+
+def build_dialogue_messages(task: dict, condition: str, history: list[dict]) -> list[dict]:
+    """Keep the original history intact and add an A-only trailing reminder.
+
+    Context still comes only from the original source/brief and user messages.
+    The reminder is the same policy for every A participant and makes no model
+    call, supplies no hidden facts, and does not invoke an optimizer.
+    """
+    messages = [{"role": "system", "content": dialogue_prompt(task, condition)}]
+    messages.extend({"role": message["role"], "content": message["content"]}
+                    for message in history if message.get("role") in {"user", "assistant"})
+    messages.extend(dialogue_message_protocol()["conditions"].get(condition, {}).get("trailing_messages", []))
+    return messages
+
+
 def audit_prompt(task: dict) -> str:
     return (
         "你是翻译语境检查模块。根据原文和对话找出会改变译法的缺失信息。"

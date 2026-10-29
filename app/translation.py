@@ -27,7 +27,8 @@ from .translation_materials import (PROJECT_TITLE, DESIGN_VERSION, FORM_VERSION,
     MATERIAL_STATUS, public_form, public_task, score_form)
 from .translation_quality import RUBRIC, parse_rating
 from .translation_panel_quality import PANEL_VERSION, MODEL_MIN, MODEL_MAX, scoring_prompt, validate_panel, aggregate_model_ratings
-from .translation_model import BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt, parse_reply, demo_reply
+from .translation_model import (BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt,
+    dialogue_message_protocol, build_dialogue_messages, parse_reply, demo_reply)
 from .translation_purpose import (DEMONSTRATION_PURPOSE, data_purpose, purpose_metadata,
     record_purpose, select_purpose_records)
 
@@ -118,7 +119,7 @@ def register_translation(app, settings, require_admin, optional_basic):
         # Freeze actual prompts and model weights, never connection credentials.
         material=dict(versions=versions,eligibility=PARTICIPANT_SCOPE,form=dict(items=FORM_ITEMS,self_items=SELF_ITEMS),task=TASK,
             rubric=RUBRIC,models=panel_config,prompts={c:dialogue_prompt(TASK,c) for c in CONDITIONS},
-            scoring_prompt=scoring_prompt(TASK))
+            message_protocol=dialogue_message_protocol(),scoring_prompt=scoring_prompt(TASK))
         material_id=_hash(material)
         # Presentation collection can precede panel setup. Keep the original
         # empty-panel cohort stable while retaining the complete material snapshot.
@@ -382,8 +383,7 @@ def register_translation(app, settings, require_admin, optional_basic):
             if settings.study_mode == 'demo':
                 reply = demo_reply(row['task'],row['condition'],history)
             else:
-                raw = await provider.complete([
-                    dict(role='system',content=dialogue_prompt(row['task'],row['condition']))] + history)
+                raw = await provider.complete(build_dialogue_messages(row['task'],row['condition'],history))
                 reply = parse_reply(raw)
                 if isinstance(provider,JSONModelProvider):
                     registry.mark_success(provider.connection,provider.last_response_model)
@@ -463,7 +463,8 @@ def register_translation(app, settings, require_admin, optional_basic):
         return dict(form=dict(version=FORM_VERSION,items=FORM_ITEMS,self_items=SELF_ITEMS),task=TASK,
                     rubric=RUBRIC,models=panel_config,versions=versions,ready=approved,**frozen,
                     material_status=MATERIAL_STATUS,cohort_id=cohort_id,material_id=material_id,
-                    model_config=model_config,limits=limits,policies=material['prompts'],study_phase='baseline_fairness')
+                    model_config=model_config,limits=limits,policies=material['prompts'],
+                    message_protocol=material['message_protocol'],study_phase='baseline_fairness')
 
     @app.post('/api/admin/translation/materials/freeze')
     def translation_freeze(body: FreezeRequest, admin=Depends(require_admin)):
