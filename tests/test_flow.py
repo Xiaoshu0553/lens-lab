@@ -467,7 +467,7 @@ def test_pilot_task_answers_directly_without_source_browser_and_keeps_machine_sc
     assert len(app.state.provider.calls) == 2
     assert app.state.provider.calls[-1][1:] == [
         {"role": "user", "content": "直接告诉我能否报名"},
-        {"role": "assistant", "content": broad["content"]},
+        {"role": "assistant", "content": ("【澄清提问】" if broad["action"] == "prompt_clarification" else "") + broad["content"]},
         {"role": "user", "content": "最新截止时间是什么？"},
     ]
     summary = client.get("/api/admin/summary", headers=auth()).json()

@@ -1,6 +1,14 @@
 # 部署指南
 
-本文使用保留示例域名 `study.example.com`。部署时替换为自己的域名；仓库不包含线上配置、密钥、数据库或真实研究记录。当前方案 `university-v1` 仅面向 18–25 岁、当前在读的专科生和本科生。
+当前默认部署为翻译信息公平性研究平台，项目为《从“直接翻译”到“主动澄清”：面向翻译使用者的信息公平性研究与促进——基于生成式人工智能轻量化优化模块的设计与实证》——以中国矿业大学翻译用户为例。
+
+默认参与者和研究后台为 `/` 与 `/admin`；`/admin/preview` 用于独立试跑，`/admin/instruments` 用于翻译材料审查。新版使用 `/api/translation`、`/api/admin/translation` 以及独立的翻译记录表，旧校园任务与合成记录不进入翻译统计。`demo` 不生成研究评分；`pilot` 使用真实模型；`live` 要求邀请码，并在后台确认冻结当前问卷、任务、量规、提示与模型配置。完整流程见 [翻译研究说明](../docs/translation-study.md)。
+
+`compose.yaml` 现在将宿主 `translation-data/` 挂载到 `/app/data`。升级时先备份旧 `university-data/`；不要把旧数据库内容当作翻译参与者数据导入。已有 `.env` 保持原样，本地 Python 使用时需手动检查 `DATABASE_PATH=./translation-data/lens.sqlite3`。新安装运行 `python3 scripts/setup.py` 会生成该默认路径。
+
+以下原有部署章节保留历史平台的部署方法和展示站点维护信息；其中 `university-v1` 的两组、30题、决策评分与126条合成展示均属于历史实验，当前翻译研究使用 S／A 两种条件和翻译材料。普通 Docker 启动命令及路径已更新，新翻译实验无需启动历史 showcase 服务。
+
+本文使用保留示例域名 `study.example.com`。部署时替换为自己的域名；仓库不包含线上配置、密钥、数据库或真实研究记录。当前翻译候选方案面向中国矿业大学年满18岁的在读专科、本科及研究生翻译使用者，页面自报确认不替代实际招募核验。
 
 ## 本地 Docker 演示
 
@@ -8,7 +16,7 @@
 
 ```bash
 python3 scripts/setup.py
-mkdir -p university-data university-showcase-data
+mkdir -p translation-data
 docker compose config --quiet
 docker compose up -d --build
 docker compose ps
@@ -16,7 +24,9 @@ docker compose ps
 
 脚本为独立安装生成随机管理员密码和分组种子，默认 `STUDY_MODE=demo`。参与者入口为 <http://127.0.0.1:8000/>，管理员入口为 <http://127.0.0.1:8000/admin>；用户名为 `admin`，密码在本地 `.env` 的 `ADMIN_PASSWORD` 中。普通演示无需模型密钥，从空记录开始。
 
-本地 Python 默认数据库为 `./university-data/lens.sqlite3`。`compose.yaml` 将宿主 `university-data/` 挂载到 `/app/data`，并固定容器内 `DATABASE_PATH=/app/data/lens.sqlite3`。不要将 `.env` 的本地相对路径当成容器路径。已有 `.env` 不会被设置脚本覆盖，升级时应检查路径。
+本地 Python 默认数据库为 `./translation-data/lens.sqlite3`。`compose.yaml` 将宿主 `translation-data/` 挂载到 `/app/data`，固定容器内 `DATABASE_PATH=/app/data/lens.sqlite3` 与 `TRANSLATION_MODELS_PATH=/app/data/.translation-models.json`。后台保存的云端密钥和模型配置随该目录持久化，容器重建不会丢失。不要将 `.env` 的本地相对路径当成容器路径。已有 `.env` 不会被设置脚本覆盖，升级时应检查路径。
+
+真实模型预测试使用 `pilot`。后台“模型与 API”可分别配置翻译对话模型和5–9个不同评审模型，各评审模型按同一套五维量规完整评分；去掉一个最高和一个最低模型总分后，按剩余模型预设权重归一化加权。保存配置与真实连通检查分别记录，模型地址、密钥存在不表示调用已成功；没有完整评审团时不生成综合分。`demo` 仍仅作规则演示，不运行研究评分。
 
 ## 使用真实模型
 
@@ -25,7 +35,7 @@ docker compose ps
 ```dotenv
 STUDY_DOMAIN=study.example.com
 STUDY_MODE=pilot
-DATABASE_PATH=./university-data/lens.sqlite3
+DATABASE_PATH=./translation-data/lens.sqlite3
 PARTICIPANT_ACCESS_CODE=replace-with-a-random-invitation-code
 MODEL_BASE_URL=https://provider.example.com/v1
 MODEL_API_KEY=自行填写API
@@ -36,15 +46,15 @@ MODEL_MAX_TOKENS=1600
 CLARIFICATION_STRATEGY=prompt
 ```
 
-两组使用同一模型、共同基础提示、公共资料、参数及完整对话历史。澄清组在对话前额外收到主动澄清提示，并在后续请求中保留；标准组没有这项额外行为要求，仍可能自然追问。两组均须回答用户当前问题，信息充分时直接回答。旧 `module` 策略配置仅兼容映射为 `prompt`。
+翻译研究当前只开放 S 直接翻译、A 主动澄清两种条件，使用同一基础模型与共同原文。须先完成公平性基线测试，再根据结果设计后续优化模块；当前不启用优化组。对话接收完整历史，模型不自动获得参与者补充资料或参考译文。`CLARIFICATION_STRATEGY` 是历史校园任务的兼容选项，不选择翻译条件。
 
 模型服务须提供 `{MODEL_BASE_URL}/chat/completions` 接口。本地服务可使用 `http://127.0.0.1:11434/v1` 等地址且可不设密钥；若模型在宿主机而应用在 Docker 中，须使用容器可访问的宿主地址。容器内 `127.0.0.1` 指向容器本身。
 
-服务报告输出达到 `MODEL_MAX_TOKENS` 上限而截断时，应用返回本轮可重试错误，不保存半截回复，也不计入有效对话轮次。修改模型、提示词或参数后重新创建容器，并开始新会话。两组澄清计数均依据相同输出标记，漏标会漏计，应配合完整对话审核。
+服务报告输出达到 `MODEL_MAX_TOKENS` 上限而截断时，应用返回本轮可重试错误，不保存半截回复，也不计入有效对话轮次。修改模型、提示词或参数后重新创建容器，并开始新会话。翻译回复通过统一 JSON 协议记录回答或澄清类型，类型由模型判断，应配合完整对话审查。
 
-管理员密码由设置脚本生成，`.env` 权限为 `600`。参与邀请码由研究者单独发放。切换 `live` 前应填写邀请码、创建当前大学生版本的正式任务，并完成材料与评分定稿；预测试任务不会自动转为正式任务。当前各模式均要求大学生年龄、在读学段和明确的在读确认，不使用旧跨年龄准入配置。
+管理员密码由设置脚本生成，`.env` 权限为 `600`。参与邀请码由研究者单独发放。切换 `live` 前应填写邀请码、审查当前翻译问卷、任务、量规与模型配置，并在研究后台确认冻结；更换材料、模型配置或实验时间与轮数限制后需重新冻结。预测试和正式记录的配置指纹不同，不自动合并。
 
-## 当前合成展示
+## 历史校园合成展示（不用于翻译研究）
 
 展示实例使用 `SHOWCASE_MODE=1`、`demo` 和独立 `showcase.sqlite3`。启动时从当前大学生材料及确定性生成器创建 126 条已完成合成记录，不需要旧 600 条跨年龄来源包：
 

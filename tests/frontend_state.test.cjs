@@ -184,11 +184,14 @@ function harness({ localStorage = new Storage(), sessionStorage = new Storage(),
   document.body ||= document.querySelector("body");
   Object.assign(document.body.dataset, bodyDataset);
   const requests = [];
+  const timers = new Map();
+  let nextTimer = 0;
   const context = vm.createContext({
-    document, localStorage, sessionStorage, crypto: webcrypto, TextEncoder, structuredClone,
+    document, localStorage, sessionStorage, crypto: webcrypto, TextEncoder, structuredClone, AbortController,
     performance, Date, console, confirm: () => true, alert() {},
     window: { scrollTo() {} }, location: { reload() {} },
-    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1,
+    setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; },
+    clearTimeout: (id) => timers.delete(id), setInterval: () => 1,
     fetch: async (url, options = {}) => {
       requests.push({ url, options });
       if (!fetch) throw new Error(`Unexpected fetch: ${url}`);
@@ -199,7 +202,7 @@ function harness({ localStorage = new Storage(), sessionStorage = new Storage(),
   context.fixtureInfo = structuredClone(info);
   vm.runInContext("info = fixtureInfo", context);
   return {
-    context, document, localStorage, sessionStorage, requests,
+    context, document, localStorage, sessionStorage, requests, timers,
     el: (id) => { const element = document.getElementById(id); assert.ok(element, `Missing element #${id}`); return element; },
     run: (code) => vm.runInContext(code, context),
     value: (code) => JSON.parse(JSON.stringify(vm.runInContext(code, context))),

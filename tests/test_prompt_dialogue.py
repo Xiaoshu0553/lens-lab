@@ -12,7 +12,8 @@ from app.student_materials import task_for
 import app.config as config_module
 from app.db import connect
 from app.main import create_app
-from app.model import CLARIFICATION_MARKER, answer_system_prompt, prompt_only_system_prompt
+from app.model import (CLARIFICATION_MARKER, DIALOGUE_OUTPUT_CONTRACT,
+                       answer_system_prompt, prompt_only_system_prompt)
 from app.record_reporting import ai_prompt_counts
 from test_flow import auth, settings, start_payload
 
@@ -49,6 +50,40 @@ def send(client, session_id, content, **extra):
     response = client.post(f"/api/session/{session_id}/message", json={"content": content, **extra})
     assert response.status_code == 200, response.text
     return response.json()
+
+
+@pytest.mark.parametrize("make_prompt", [answer_system_prompt, prompt_only_system_prompt])
+def test_both_arms_share_intent_priority_json_output_and_consistency_rules(make_prompt):
+    prompt = make_prompt(task_for("21-23"))
+    assert "用户只是问候：简短回应，邀请提问，不索取个案事实" in prompt
+    assert "不知道、查不到或无法补充某项事实：不再索取该事实" in prompt
+    assert "报名流程（如‘怎么报名’）" in prompt
+    assert "前文有未完成的个案推荐，也不改变本轮意图" in prompt
+    assert "每轮尽量控制在300汉字内，多个问题逐项答全" in prompt
+    assert "不为缩短而遗漏所问结论" in prompt
+    assert "‘本人确认选择’不等于必须本人亲自递交" in prompt
+    assert DIALOGUE_OUTPUT_CONTRACT in prompt
+    assert "kind只能是answer或clarification" in prompt
+    assert "先写content，再根据正文填写kind" in prompt
+    assert "要求用户提供、补充或确认个案事实" in prompt
+    assert "kind必须为clarification" in prompt
+    assert "仅确认‘第一个’指哪段内容或用户想了解哪个话题时，kind为answer" in prompt
+    assert CLARIFICATION_MARKER not in prompt
+    assert "首句的‘是’或‘否’必须与后续结论和资料依据一致" in prompt
+    assert "截止日期与包含钟点的完整截止时点" in prompt
+    assert "截止时点更正，其他规则继续有效" in prompt
+
+
+def test_adaptive_prompt_requires_one_missing_fact_and_stops_when_unavailable():
+    prompt = prompt_only_system_prompt(task_for("21-23"))
+    assert "共同规则的前3项优先" in prompt
+    assert "只有本轮明确请求针对个案的判断或推荐" in prompt
+    assert "用户也没有表示无法提供的事实时，才先提问" in prompt
+    assert "‘先不要假定’只禁止猜测，不表示事实无法补充" in prompt
+    assert "content只写关于一个尚缺事实的直接问句" in prompt
+    assert "不提其他缺失事实、不列条件方案" in prompt
+    assert "用户无法补充时改给有依据的条件性建议" in prompt
+    assert "有依据的条件性建议" in prompt
 
 
 @pytest.mark.parametrize("mode", ["pilot", "live"])
@@ -117,9 +152,9 @@ def test_clarification_prompt_survives_multiple_questions_and_context_is_retaine
     assert provider.calls[0][0] == provider.calls[1][0] == provider.calls[2][0]
     assert provider.calls[2][1:] == [
         {"role": "user", "content": "我能选哪种参加安排？"},
-        {"role": "assistant", "content": first["content"]},
+        {"role": "assistant", "content": CLARIFICATION_MARKER + first["content"]},
         {"role": "user", "content": "我以前从来没有获得过这个项目的名额。"},
-        {"role": "assistant", "content": second["content"]},
+        {"role": "assistant", "content": CLARIFICATION_MARKER + second["content"]},
         {"role": "user", "content": "我每周最多能到场一次，请现在回答该选什么。"},
     ]
     restored = client.get(f"/api/session/{sid}").json()

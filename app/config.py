@@ -52,6 +52,7 @@ class Settings:
     synthetic_dataset_root: Path | None = None
     preview_api_prefix: str = ""
     researcher_preview_only: bool = False
+    translation_models_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -87,7 +88,7 @@ class Settings:
         local_provider = urlparse(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
         if mode in {"pilot", "live"} and not key and not local_provider:
             raise ValueError("请自行填写API：远程模型服务必须配置 MODEL_API_KEY；本地 Ollama 可以留空")
-        db = Path(os.getenv("DATABASE_PATH", str(ROOT / "university-data" / "lens.sqlite3")))
+        db = Path(os.getenv("DATABASE_PATH", str(ROOT / "translation-data" / "lens.sqlite3")))
         if not db.is_absolute():
             db = ROOT / db
         model_name = os.getenv("MODEL_NAME", "example-model-id")
@@ -134,4 +135,5 @@ class Settings:
             synthetic_dataset_root=Path(os.environ["SYNTHETIC_DATASET_ROOT"]) if os.getenv("SYNTHETIC_DATASET_ROOT") else None,
             preview_api_prefix=preview_prefix,
             researcher_preview_only=preview_only_flag == "1",
+            translation_models_path=Path(os.getenv("TRANSLATION_MODELS_PATH", str(ROOT / ".translation-models.json"))),
         )

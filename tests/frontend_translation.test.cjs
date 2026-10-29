@@ -1,0 +1,137 @@
+// Run with: node --test tests/frontend_translation.test.cjs
+// Executes shipped handlers against the repository's lightweight DOM fixture.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const {webcrypto} = require('node:crypto');
+const root = path.resolve(__dirname, '..');
+const existingFixture = fs.readFileSync(path.join(__dirname, 'frontend_state.test.cjs'), 'utf8');
+const fixtureClasses = existingFixture.slice(existingFixture.indexOf('class Storage'), existingFixture.indexOf('\nconst info ='));
+const info = {study_mode: 'pilot', max_turns: 12, max_minutes: 30, ready: true, access_code_required: false};
+const form = {version: 'translation-test', items: [{id: 'q1', stem: '译文判断', options: ['甲', '乙']}], self_items: []};
+const response = body => ({ok: true, status: 200, json: async () => body});
+function session(id = 'session-one', overrides = {}) {
+  return {id, task: {title: '共同翻译任务', instructions: '英译中', source_text: 'This is the source.', brief: '小说', context_cards: []}, messages: [], draft: '', draft_saved_at: null, completed_turns: 0, completed_request_ids: [], remaining_seconds: 600, pending_reply: false, can_submit: false, ended_at: null, study_mode: 'pilot', ...overrides};
+}
+function harness({admin = false, preview = false, stored = {}, fetch = () => { throw new Error('Unexpected request'); }, pathname = '/admin'} = {}) {
+  const basename = admin ? 'translation-admin' : 'translation';
+  const html = fs.readFileSync(path.join(root, 'static', basename + '.html'), 'utf8');
+  const {Storage, Element, makeDocument} = new Function('html', `${fixtureClasses}\nreturn {Storage, Element, makeDocument};`)(html);
+  const document = makeDocument(); document.body = document.querySelector('body');
+  if (preview) document.body.dataset.researcherPreview = 'true';
+  const storage = new Storage(stored), timers = new Map(), requests = [];
+  let nextTimer = 0;
+  const context = vm.createContext({document, sessionStorage: storage, Node: Element, crypto: webcrypto, AbortController, console, Date, Intl,
+    navigator: {clipboard: {writeText: async () => {}}},
+    window: {confirm: () => true, addEventListener() {}}, location: {pathname, href: '', replace() {}},
+    setInterval: () => 1,
+    setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, {callback, delay}); return id; }, clearTimeout: id => timers.delete(id),
+    fetch: async (url, options = {}) => { requests.push({url, options}); return fetch(url, options); }
+  });
+  let source = fs.readFileSync(path.join(root, 'static', basename + '.js'), 'utf8');
+  if (admin) source = source.replace('  refresh().then(() => { if (location.pathname === "/admin/instruments") showMaterials(); });', `
+    globalThis.hooks = {api, filteredRecords, assessmentView, showMaterials, renderRecords, renderSummary,
+      prime(data) { if (data.records) records = data.records; if (data.summary) summary = data.summary; }};`);
+  else source = source.replace('  init();', `
+    globalThis.hooks = {api, start, send, applyView, intakeReady, recover, schedulePoll,
+      state: () => ({saved, messageRequest, busy, view, pollCount}),
+      prime(data) { if (data.info) info = data.info; if (data.form) form = data.form; if (data.saved) saved = data.saved; if (data.answers) answers = data.answers; if (data.selfAnswers) selfAnswers = data.selfAnswers; }};`);
+  vm.runInContext(source, context, {filename: basename + '.js'});
+  if (!admin) context.hooks.prime({info: structuredClone(info), form: structuredClone(form)});
+  const element = id => document.getElementById(id);
+  return {hooks: context.hooks, element, storage, timers, requests};
+}
+function intake(h) {
+  h.element('age-band').value = '18-20'; h.element('education-stage').value = 'bachelor'; h.element('translation-experience').value = '2'; h.element('consent').checked = true; h.element('university-confirmed').checked = true;
+}
+async function fireTimer(h, delay) {
+  const pair = [...h.timers.entries()].find(([, timer]) => timer.delay === delay); assert.ok(pair, `Expected ${delay}ms timer`); h.timers.delete(pair[0]); await pair[1].callback();
+}
+function allText(node) { return [node.textContent, ...node.children.map(allText)].join(' '); }
+
+test('start persists a stable request ID without persisting the invitation code', async () => {
+  const h = harness({fetch: () => response(session())}); intake(h); h.element('access-code').value = 'PRIVATE-INVITE-123';
+  h.hooks.prime({answers: {q1: 0}, selfAnswers: {}}); await h.hooks.start();
+  const submitted = JSON.parse(h.requests[0].options.body); assert.equal(submitted.access_code, 'PRIVATE-INVITE-123');
+  const stored = [...h.storage.values.values()].join(''); assert.ok(!stored.includes('PRIVATE-INVITE-123')); assert.ok(stored.includes(submitted.request_id));
+});
+
+test('authorized preview can begin before live freezing and without an invitation', () => {
+  const h = harness({preview: true}); intake(h); h.hooks.prime({info: {...info, study_mode: 'live', ready: false, access_code_required: true}});
+  assert.equal(h.hooks.intakeReady(), true);
+  const participant = harness(); intake(participant); participant.hooks.prime({info: {...info, study_mode: 'live', ready: false, access_code_required: true}});
+  assert.equal(participant.hooks.intakeReady(), false);
+});
+
+test('draft restoration is scoped to its session and respects the newer server draft', () => {
+  const h = harness(); h.hooks.prime({saved: {sessionId: 'old', draftSessionId: 'old', draft: 'other session draft', draftUpdatedAt: Date.now()}});
+  h.hooks.applyView(session('new', {draft: 'server draft'}), true); assert.equal(h.element('draft-input').value, 'server draft');
+  h.hooks.prime({saved: {sessionId: 'new', draftSessionId: 'new', draft: 'unsaved local draft', draftUpdatedAt: Date.parse('2026-10-29T10:02:00Z')}});
+  h.hooks.applyView(session('new', {draft: 'older server draft', draft_saved_at: '2026-10-29T10:01:00Z'}), true); assert.equal(h.element('draft-input').value, 'unsaved local draft');
+  h.hooks.applyView(session('new', {draft: 'newer server draft', draft_saved_at: '2026-10-29T10:03:00Z'}), true); assert.equal(h.element('draft-input').value, 'newer server draft');
+  assert.equal(h.hooks.state().saved.draftConflict.text, 'unsaved local draft'); assert.equal(h.element('draft-conflict').hidden, false);
+});
+
+test('a hanging POST releases the form, retains its ID, and polls the accepted request', async () => {
+  let requestId, signal;
+  const h = harness({fetch: (url, options) => {
+    if (url.endsWith('/message')) { requestId = JSON.parse(options.body).request_id; signal = options.signal; return new Promise(() => {}); }
+    return response(session('session-one', {pending_reply: true, pending_request_id: requestId}));
+  }});
+  h.hooks.applyView(session(), true); h.element('message-input').value = '请将这段小说翻译成中文。';
+  const sending = h.element('chat-form').emit('submit'); await fireTimer(h, 210000); await sending;
+  assert.equal(signal.aborted, true); assert.equal(h.hooks.state().busy, false); assert.equal(h.hooks.state().messageRequest.id, requestId);
+  assert.match(h.element('chat-error').textContent, /超时/); assert.equal(h.element('sync-button').hidden, false); assert.equal(h.element('send-button').disabled, true);
+  assert.ok([...h.timers.values()].some(timer => timer.delay === 2500));
+  h.hooks.applyView(session('session-one', {completed_turns: 1, completed_request_ids: [requestId], can_submit: true}));
+  assert.equal(h.hooks.state().messageRequest, null); assert.equal(h.element('message-input').value, ''); assert.equal(h.element('chat-error').textContent, ''); assert.equal(h.element('send-button').disabled, false);
+  assert.equal(h.timers.size, 0);
+});
+
+test('automatic pending polling stops once the saved reply is available', async () => {
+  const h = harness({fetch: () => response(session('session-one', {completed_turns: 1, can_submit: true}))});
+  h.hooks.applyView(session('session-one', {pending_reply: true}), true); await fireTimer(h, 2500);
+  assert.equal(h.hooks.state().view.pending_reply, false); assert.equal(h.timers.size, 0); assert.equal(h.element('sync-button').hidden, true);
+});
+
+test('current-cohort record view excludes old model scores until explicitly selected', () => {
+  const h = harness({admin: true}); h.element('cohort-filter').value = 'current'; h.element('kind-filter').value = 'all'; h.element('condition-filter').value = 'all'; h.element('assessment-filter').value = 'all';
+  h.hooks.prime({records: [{id: 'current', current_cohort: true, score: 90}, {id: 'old-model', current_cohort: false, score: 99}]});
+  assert.deepEqual(Array.from(h.hooks.filteredRecords(), record => record.id), ['current']);
+  h.element('cohort-filter').value = 'historical'; assert.deepEqual(Array.from(h.hooks.filteredRecords(), record => record.id), ['old-model']);
+});
+
+test('expert detail reads weighted totals from the aggregate result', () => {
+  const h = harness({admin: true}); const rendered = h.hooks.assessmentView({score: 82, sd: 3, range: 10, trimmed_expert_ids: [], dimensions: {}, ratings: [{expert_id: 'faithfulness', scores: {}, evidence: ['语义准确'], critical_errors: []}], expert_totals: {faithfulness: 83.5}});
+  assert.match(allText(rendered), /83\.5/);
+});
+
+test('pilot readiness is not displayed as frozen material approval', async () => {
+  const h = harness({admin: true, fetch: () => response({ready: true, frozen: false, material_status: '候选材料', form: {items: [], self_items: []}, task: {}, rubric: [], experts: []})}); h.hooks.prime({summary: {study_mode: 'pilot'}}); await h.hooks.showMaterials();
+  assert.match(h.element('materials-status').textContent, /未冻结/); assert.equal(h.element('materials-freeze').hidden, true);
+});
+
+
+test('baseline researcher preview offers only direct and active clarification conditions', () => {
+  const html = fs.readFileSync(path.join(root, 'static', 'translation.html'), 'utf8');
+  const choices = html.match(/<select id="preview-condition">([\s\S]*?)<\/select>/)[1];
+  assert.deepEqual(Array.from(choices.matchAll(/<option value="([^"]*)"/g), match => match[1]), ['', 'S', 'A']);
+  const adminHtml = fs.readFileSync(path.join(root, 'static', 'translation-admin.html'), 'utf8');
+  assert.doesNotMatch(adminHtml, /<option value="O">/);
+  assert.match(adminHtml, /尚未开展优化模块/);
+  assert.match(adminHtml, /每个不同的评审模型/);
+});
+
+test('baseline summary renders two conditions and reports API verification truthfully', () => {
+  const h = harness({admin: true});
+  h.hooks.prime({summary: {study_mode: 'pilot', model_api_verified: false, counts: {}, cells: [], gaps: [], effects: []}});
+  h.hooks.renderSummary();
+  const cellsText = allText(h.element('cells')), effectsText = allText(h.element('effects'));
+  assert.match(cellsText, /S · 直接翻译/); assert.match(cellsText, /A · 主动澄清/);
+  assert.doesNotMatch(cellsText, /O ·|优化/); assert.doesNotMatch(effectsText, /优化收益/);
+  assert.match(h.element('admin-mode').textContent, /尚未记录成功 API 调用/);
+  h.hooks.prime({summary: {study_mode: 'pilot', model_api_verified: true, counts: {}, cells: [], gaps: [], effects: []}});
+  h.hooks.renderSummary(); assert.match(h.element('admin-mode').textContent, /已记录成功 API 调用/);
+});

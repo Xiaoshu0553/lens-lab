@@ -124,7 +124,8 @@ def test_preview_arms_use_real_dialogue_and_stay_outside_participant_analysis(tm
         assert second.json()["action"] == "answer" and "登记甲和弹性安排" in second.json()["content"]
         assert provider.calls[-1] == [
             {"role": "system", "content": system}, {"role": "user", "content": question},
-            {"role": "assistant", "content": first.json()["content"]}, {"role": "user", "content": facts}]
+            {"role": "assistant", "content": ("【澄清提问】" if first.json()["action"] == "prompt_clarification" else "") + first.json()["content"]},
+            {"role": "user", "content": facts}]
         decisions = client.post(f"/api/session/{sid}/decision", headers=auth())
         assert decisions.status_code == 200, decisions.text
         options = decisions.json()

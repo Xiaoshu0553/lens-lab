@@ -38,11 +38,13 @@ from .record_reporting import (ai_prompt_counts, ai_prompt_totals, automatic_ana
 from .process_alerts import derive_process_alerts
 from .reply_timing import aggregate_reply_timing, reply_timing
 from .model import (ANSWER_PROMPT_VERSION, CLARIFICATION_MARKER,
+                    DEMO_ANSWER_PROMPT_VERSION, DEMO_PROMPT_ONLY_VERSION,
                     PROMPT_ONLY_VERSION, DemoProvider, LiveProvider, ModelError,
                     answer_system_prompt, prompt_only_system_prompt)
 from .student_seed import seed_student_materials
 from .student_synthetic_exports import register_student_synthetic_exports
 from .student_showcase import guard_student_showcase_database, seed_student_showcase
+from .translation import register_translation
 
 
 GROUPS = {"S": "standard", "A": "adaptive"}
@@ -242,7 +244,8 @@ PENDING_LEASE_SECONDS = 300
 
 
 def _fail_pending_request(db, session_id: str, request_id: str, event: str,
-                          *, expected_attempt_id: str | None = None, error_type: str | None = None) -> None:
+                          *, expected_attempt_id: str | None = None, error_type: str | None = None,
+                          provider_error: ModelError | None = None) -> None:
     row = db.execute("SELECT pending_request_id,pending_attempt_id FROM sessions WHERE id=?", (session_id,)).fetchone()
     if (row is None or row["pending_request_id"] != request_id or
             (expected_attempt_id is not None and row["pending_attempt_id"] != expected_attempt_id)):
@@ -255,7 +258,15 @@ def _fail_pending_request(db, session_id: str, request_id: str, event: str,
     db.execute("UPDATE message_requests SET status='failed',user_message_id=NULL WHERE session_id=? AND request_id=?",
                (session_id, request_id))
     db.execute("UPDATE sessions SET pending_request_id=NULL,pending_started_at=NULL,pending_attempt_id=NULL WHERE id=?", (session_id,))
-    _add_event(db, session_id, event, {"request_id": request_id, **({"error_type": error_type} if error_type else {})})
+    detail = {"request_id": request_id, **({"error_type": error_type} if error_type else {})}
+    if provider_error is not None:
+        # Record bounded machine diagnostics, never upstream bodies, keys or URLs.
+        detail["error_code"] = provider_error.code
+        if provider_error.__cause__ is not None:
+            detail["provider_error_type"] = type(provider_error.__cause__).__name__
+        if provider_error.http_status is not None:
+            detail["http_status"] = provider_error.http_status
+    _add_event(db, session_id, event, detail)
 
 
 def _recover_expired_request(db, session: dict) -> dict:
@@ -381,7 +392,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Legacy `module` settings are accepted, but new sessions always use the
     # requested two-arm design: ordinary dialogue vs. an extra system instruction.
     strategy = "prompt"
-    cohort_prompts = (ANSWER_PROMPT_VERSION, ANSWER_PROMPT_VERSION + "+" + PROMPT_ONLY_VERSION)
+    # The offline demo does not call these model prompts. Keep its frozen
+    # identifiers so a real-model prompt correction cannot relabel seeded
+    # showcase rows or discard their existing analysis cohort.
+    answer_prompt_version = DEMO_ANSWER_PROMPT_VERSION if settings.study_mode == "demo" else ANSWER_PROMPT_VERSION
+    clarification_prompt_version = DEMO_PROMPT_ONLY_VERSION if settings.study_mode == "demo" else PROMPT_ONLY_VERSION
+    cohort_prompts = (answer_prompt_version, answer_prompt_version + "+" + clarification_prompt_version)
     if settings.showcase_mode:
         with connect(settings.database_path) as db:
             seed_student_showcase(db, settings, model_config_id=model_config_id, cohort_prompts=cohort_prompts,
@@ -463,7 +479,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
                                     headers={**(exc.headers or {}), "Cache-Control": "no-store"})
         response = await call_next(request)
-        if (request.url.path.startswith(("/admin", "/api/admin/"))
+        if (request.url.path.startswith(("/admin", "/api/admin/", "/api/translation/"))
                 or settings.researcher_preview_only and request.url.path.startswith("/api/")):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Referrer-Policy"] = "same-origin"
@@ -490,6 +506,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return credentials.username
 
     register_student_synthetic_exports(app, require_admin, dataset_root)
+    register_translation(app, settings, require_admin, optional_basic)
 
     @app.get("/admin/login")
     def admin_login_page():
@@ -516,6 +533,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/")
     def participant_page():
+        return FileResponse(ROOT / "static" / "translation.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/legacy")
+    def legacy_participant_page():
         return FileResponse(ROOT / "static" / "index.html")
 
     @app.get("/healthz")
@@ -524,17 +545,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/static/{name}")
     def static_file(name: str):
-        if name not in {"app.js", "admin.js", "admin-login.js", "admin-synthetic.js", "style.css"}:
+        if name not in {"app.js", "admin.js", "admin-login.js", "admin-synthetic.js", "style.css",
+                        "translation.js", "translation-admin.js", "translation.css"}:
             raise HTTPException(404)
         return FileResponse(ROOT / "static" / name)
 
     @app.get("/admin")
     def admin_page(admin: str = Depends(require_admin)):
+        return FileResponse(ROOT / "static" / "translation-admin.html")
+
+    @app.get("/admin/legacy")
+    def legacy_admin_page(admin: str = Depends(require_admin)):
         return FileResponse(ROOT / "static" / "admin.html")
 
     @app.get("/admin/preview")
     def preview_page(admin: str = Depends(require_admin)):
-        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        html = (ROOT / "static" / "translation.html").read_text(encoding="utf-8")
         prefix = f' data-api-prefix="{settings.preview_api_prefix}"' if settings.preview_api_prefix else ""
         return HTMLResponse(html.replace("<body>", f'<body data-researcher-preview="true"{prefix}>'))
 
@@ -551,7 +577,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "researcher_preview": researcher_preview,
                 "showcase_totals": showcase_totals, "has_active_task": bool(count),
                 "max_turns": settings.max_turns, "max_minutes": settings.max_minutes, "provider_local": local_provider,
-                "clarification_strategy": strategy, "answer_prompt_version": ANSWER_PROMPT_VERSION,
+                "clarification_strategy": strategy, "answer_prompt_version": answer_prompt_version,
+                "prompt_versions": {"standard": cohort_prompts[0], "adaptive": cohort_prompts[1]},
                 "design_version": DESIGN_VERSION, "literacy_instrument_version": FORM_VERSION,
                 "age_bands": [{"id": key, **value} for key, value in AGE_BANDS.items()],
                 "eligibility": {"minimum_age": 18, "maximum_age": 25, "enrollment_required": True,
@@ -650,9 +677,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 hmac.new(settings.assignment_seed.encode(), f"{sid}:{g}".encode(), hashlib.sha256).digest()))
             task = _apply_scenario(task, scenario_id)
             interaction = GROUPS[group]
-            prompt_version = ANSWER_PROMPT_VERSION
+            prompt_version = answer_prompt_version
             if interaction == "adaptive":
-                prompt_version += "+" + PROMPT_ONLY_VERSION
+                prompt_version += "+" + clarification_prompt_version
             db.execute(
                 """INSERT INTO sessions
                 (id,task_id,group_id,expression_condition,interaction_condition,run_mode,is_demo,assignment_seed,
@@ -759,8 +786,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "任务已经提交")
             if session["decision_started_at"]:
                 raise HTTPException(409, "已进入决策阶段，不能继续提问")
-            expected_prompt = ANSWER_PROMPT_VERSION + (
-                "+" + PROMPT_ONLY_VERSION
+            expected_prompt = answer_prompt_version + (
+                "+" + clarification_prompt_version
                 if session["interaction_condition"] == "adaptive" else ""
             )
             if (session["run_mode"] != settings.study_mode or session["clarification_strategy"] != strategy
@@ -797,7 +824,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # follow-ups and requests for a plan. Routing to a frozen card
                 # used to discard the question and the model's natural answer.
                 system_prompt = prompt_only_system_prompt(task) if use_prompt else answer_system_prompt(task)
-                chat_history = [{"role": m["role"], "content": m["content"]} for m in history]
+                chat_history = [{"role": m["role"], "content": (
+                    CLARIFICATION_MARKER + m["content"]
+                    if m["role"] == "assistant" and m["action"] == "prompt_clarification" else m["content"]
+                )} for m in history]
                 answer = await app.state.provider.complete(
                     [{"role": "system", "content": system_prompt}] + chat_history
                 )
@@ -913,7 +943,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "used_extra_prompt": use_prompt,
                     })
                 if use_prompt:
-                    _add_event(db, session_id, "prompt_strategy", {"version": PROMPT_ONLY_VERSION,
+                    _add_event(db, session_id, "prompt_strategy", {"version": clarification_prompt_version,
                                "used_extra_prompt": True, "source": "demo_rule" if session["run_mode"] == "demo" else "model_prompt",
                                "detected_clarification": action == "prompt_clarification"})
                 db.execute("INSERT INTO messages(session_id,role,content,action,created_at) VALUES (?,?,?,?,?)",
@@ -932,7 +962,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with connect(settings.database_path) as db:
                 db.execute("BEGIN IMMEDIATE")
                 _fail_pending_request(db, session_id, request_id, "provider_error" if isinstance(exc, ModelError) else "request_failed",
-                                      expected_attempt_id=attempt_id, error_type=type(exc).__name__)
+                                      expected_attempt_id=attempt_id, error_type=type(exc).__name__,
+                                      provider_error=exc if isinstance(exc, ModelError) else None)
             if isinstance(exc, ModelError):
                 raise HTTPException(503, "模型暂时不可用，本轮不计入次数，请重试") from exc
             raise
@@ -1089,6 +1120,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/admin/instruments", response_class=HTMLResponse)
     def instrument_review(admin: str = Depends(require_admin)):
+        return FileResponse(ROOT / "static" / "translation-admin.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/admin/legacy/instruments", response_class=HTMLResponse)
+    def legacy_instrument_review(admin: str = Depends(require_admin)):
         return HTMLResponse(render_review_html(), headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"})
 
     @app.get("/api/admin/instruments")

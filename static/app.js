@@ -44,18 +44,34 @@ let pollingTimer = null;
 let draft = readJSON(sessionStorage, DRAFT_KEY, {});
 let startRequestId = null;
 let navigationSequence = 0;
+let sessionSyncSequence = 0;
+let appliedSessionSyncSequence = 0;
 
 async function api(path, options = {}) {
-  let response;
-  try { response = await fetch(`${API_PREFIX}${path}`, { headers: { "Content-Type": "application/json" }, ...options }); }
-  catch { throw new Error("网络连接失败，请检查网络后重试"); }
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(typeof body.detail === "string" ? body.detail : `请求未完成（${response.status}）`);
-    error.status = response.status;
-    throw error;
-  }
-  return body;
+  const { timeoutMs = 30000, ...requestOptions } = options;
+  const controller = new AbortController();
+  const timeoutError = new Error("请求等待超时，请重新同步后重试");
+  let timer;
+  const work = async () => {
+    let response;
+    try { response = await fetch(`${API_PREFIX}${path}`, { headers: { "Content-Type": "application/json" }, ...requestOptions, signal: controller.signal }); }
+    catch { throw controller.signal.aborted ? timeoutError : new Error("网络连接失败，请检查网络后重试"); }
+    let body;
+    try { body = await response.json(); }
+    catch { if (response.ok) throw new Error("服务器回复格式异常，请重新同步后重试"); body = {}; }
+    if (!response.ok) {
+      const error = new Error(typeof body?.detail === "string" ? body.detail : `请求未完成（${response.status}）`);
+      error.status = response.status;
+      throw error;
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("服务器回复格式异常，请重新同步后重试");
+    return body;
+  };
+  try {
+    return await Promise.race([work(), new Promise((_, reject) => {
+      timer = setTimeout(() => { reject(timeoutError); controller.abort(); }, timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
 }
 function show(id) { $(id).hidden = false; }
 function hide(id) { $(id).hidden = true; }
@@ -239,11 +255,19 @@ function tickClock() {
   updateControls();
 }
 function matchesConfig(session) {
+  const expectedPrompt = info.prompt_versions?.[session.interaction_condition];
   return session.design_version === info.design_version && session.run_mode === info.study_mode
     && session.clarification_strategy === info.clarification_strategy && session.literacy_band_width === info.literacy_band_width
-    && session.model_config_id === info.model_config_id && session.prompt_version.startsWith(info.answer_prompt_version);
+    && session.model_config_id === info.model_config_id && (expectedPrompt
+      ? session.prompt_version === expectedPrompt : session.prompt_version.startsWith(info.answer_prompt_version));
 }
 function renderSession(data) {
+  if (!data || typeof data.id !== "string" || !data.task || typeof data.task !== "object"
+    || typeof data.prompt_version !== "string" || !Array.isArray(data.messages)
+    || data.messages.some((message) => !message || !["user", "assistant"].includes(message.role)
+      || typeof message.content !== "string" || !message.content.trim())) {
+    throw new Error("服务器返回的对话记录不完整，请重新同步后重试");
+  }
   currentSession = data; compatibleSession = matchesConfig(data);
   const savedMessage = readJSON(sessionStorage, PENDING_MESSAGE_KEY, null);
   if (savedMessage?.sessionId === sessionId) {
@@ -289,23 +313,61 @@ function renderSession(data) {
 async function syncSession() {
   if (!sessionId) return;
   const target = sessionId;
+  const navigation = navigationSequence;
+  const sequence = ++sessionSyncSequence;
   const data = await api(`/api/session/${target}`);
-  if (target === sessionId) renderSession(data);
+  if (target !== sessionId || navigation !== navigationSequence) return null;
+  // A slower, older snapshot must not hide a reply shown by a newer sync.
+  // A newer request that fails must not suppress an otherwise valid snapshot.
+  if (sequence < appliedSessionSyncSequence) return currentSession;
+  if (data.id !== target) throw new Error("服务器返回的会话编号不一致，请重新同步后重试");
+  renderSession(data);
+  appliedSessionSyncSequence = sequence;
   return data;
+}
+function savedMessageRequest() {
+  const request = readJSON(sessionStorage, PENDING_MESSAGE_KEY, null);
+  return request?.sessionId === sessionId ? request : null;
+}
+function showSyncedReply(data, request = null, elapsed = null) {
+  if (!data) return;
+  if (data.pending_reply) {
+    setError("chat-error"); hide("sync-button");
+    $("chat-status").textContent = "AI 正在回复，页面会自动同步…";
+  } else if (request && !data.completed_request_ids?.includes(request.requestId)) {
+    $("chat-status").textContent = "本轮尚未完成。";
+    setError("chat-error", "本轮未收到回复，问题已保留，请重试。"); show("sync-button");
+  } else {
+    setError("chat-error"); hide("sync-button");
+    $("chat-status").textContent = elapsed == null ? "对话已同步。" : `已回复 · ${elapsed.toFixed(1)} 秒`;
+  }
 }
 function showResumeFailure(error) {
   show("resume-notice"); show("resume-button"); hide("restart-button");
   $("resume-copy").textContent = `${error.message}。会话编号已保留，可重新连接。`;
   show("sync-button");
 }
-function schedulePoll() {
+function schedulePoll(delay = 1800) {
   clearTimeout(pollingTimer);
   const target = sessionId;
+  const navigation = navigationSequence;
   pollingTimer = setTimeout(async () => {
-    if (target !== sessionId) return;
-    try { const data = await syncSession(); if (!data.pending_reply) { $("chat-status").textContent = "对话已同步。"; hide("sync-button"); } }
-    catch (error) { setError("chat-error", `${error.message}。请点击“重新同步对话”。`); show("sync-button"); }
-  }, 1800);
+    pollingTimer = null;
+    if (target !== sessionId || navigation !== navigationSequence) return;
+    const request = savedMessageRequest();
+    try {
+      const data = await syncSession();
+      if (target !== sessionId || navigation !== navigationSequence) return;
+      showSyncedReply(data, request);
+      // Another sync may supersede this one without rendering a new poll timer.
+      if (pendingReply && pollingTimer == null) schedulePoll();
+    }
+    catch (error) {
+      if (target !== sessionId || navigation !== navigationSequence) return;
+      setError("chat-error", `${error.message}。正在自动重连，也可点击“重新同步对话”。`); show("sync-button");
+      if (pendingReply) schedulePoll(5000);
+    }
+  }, delay);
 }
 function archiveCurrent() {
   if (!sessionId) return;
@@ -459,14 +521,22 @@ $("chat-form").addEventListener("submit", async (event) => {
   messageBusy = true; setError("chat-error"); hide("sync-button"); $("chat-status").textContent = "AI 正在回复…"; updateControls();
   const begin = performance.now();
   try {
-    await api(`/api/session/${target}/message`, { method: "POST", body: JSON.stringify({ content, request_id: request.requestId }) });
+    // A turn can include two provider calls of up to 90 seconds each.
+    await api(`/api/session/${target}/message`, { method: "POST", body: JSON.stringify({ content, request_id: request.requestId }), timeoutMs: 210000 });
     if (target !== sessionId) return;
-    $("message-input").value = ""; writeStorage(sessionStorage, PENDING_MESSAGE_KEY, null);
-    await syncSession(); $("chat-status").textContent = `已回复 · ${((performance.now() - begin) / 1000).toFixed(1)} 秒`;
+    // Keep the draft and its deduplication ID until the saved conversation confirms it.
+    const data = await syncSession();
+    if (target === sessionId) showSyncedReply(data, request, (performance.now() - begin) / 1000);
   } catch (error) {
     if (target !== sessionId) return;
     setError("chat-error", `${error.message}。输入已保留，可重试或同步。`); show("sync-button");
-    try { await syncSession(); } catch { /* Keep the session token and draft during network failures. */ }
+    $("chat-status").textContent = "尚未确认本轮回复。";
+    try {
+      const data = await syncSession();
+      if (target === sessionId && (data?.pending_reply || data?.completed_request_ids?.includes(request.requestId))) {
+        showSyncedReply(data, request, (performance.now() - begin) / 1000);
+      }
+    } catch { /* Keep the session token and draft during network failures. */ }
   } finally { if (target === sessionId) { messageBusy = false; updateControls(); } }
 });
 $("enter-decision-button").addEventListener("click", async () => {
@@ -500,7 +570,15 @@ async function withdraw() {
   } catch (error) { alert(error.message); lifecycleBusy = false; updateControls(); }
 }
 for (const id of ["withdraw-button", "withdraw-chat-button", "done-withdraw"]) $(id).addEventListener("click", withdraw);
-for (const id of ["resume-button", "sync-button"]) $(id).addEventListener("click", async () => { try { await syncSession(); setError("chat-error"); hide("sync-button"); } catch (error) { showResumeFailure(error); } });
+for (const id of ["resume-button", "sync-button"]) $(id).addEventListener("click", async () => {
+  const target = sessionId, navigation = navigationSequence, request = savedMessageRequest();
+  try { const data = await syncSession(); if (target === sessionId && navigation === navigationSequence) showSyncedReply(data, request); }
+  catch (error) {
+    if (target !== sessionId || navigation !== navigationSequence) return;
+    showResumeFailure(error);
+    if (pendingReply) schedulePoll(5000);
+  }
+});
 $("restart-button").addEventListener("click", beginNewSession);
 $("new-pilot-button").addEventListener("click", beginNewSession);
 setInterval(tickClock, 1000);

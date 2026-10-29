@@ -8,6 +8,7 @@ data/
 synthetic-datasets/
 showcase-data/
 university-data/
+translation-data/
 university-showcase-data/
 backups/
 output/
@@ -35,3 +36,7 @@ __pycache__/
 .coverage
 htmlcov/
 /literacy-preview.png
+
+.translation-models.json
+.translation-models.json.*
+.translation-models-*

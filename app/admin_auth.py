@@ -14,7 +14,7 @@ from fastapi import HTTPException, Request
 SESSION_COOKIE = "lens_admin_session"
 BROWSER_COOKIE = "lens_admin_browser"
 SESSION_SECONDS = 8 * 60 * 60
-ADMIN_PAGES = {"/admin", "/admin/preview", "/admin/instruments"}
+ADMIN_PAGES = {"/admin", "/admin/preview", "/admin/instruments", "/admin/legacy", "/admin/legacy/instruments"}
 
 
 def issue_session(password: str, *, now: float | None = None) -> str:

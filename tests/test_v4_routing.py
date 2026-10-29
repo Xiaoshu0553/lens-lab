@@ -10,7 +10,8 @@ from app.evidence import (
     ROUTER_VERSION, asks_for_decision, case_fact_question_reply, fact_evidence_card,
     missing_slots, participant_fact_reply, route_question,
 )
-from app.model import ANSWER_PROMPT_VERSION, DECISION_PROMPT_VERSION, PROMPT_ONLY_VERSION
+from app.model import (ANSWER_PROMPT_VERSION, DECISION_PROMPT_VERSION, PROMPT_ONLY_VERSION,
+                       DEMO_ANSWER_PROMPT_VERSION, DEMO_PROMPT_ONLY_VERSION)
 from app.seed import PILOT_TASK_V5
 
 
@@ -157,6 +158,8 @@ def test_historical_funding_task_and_prompt_versions_remain_supported():
     assert "还不知道" in reply
     assert ROUTER_VERSION == "evidence-router-v5"  # Frozen legacy/offline routing.
     assert DECISION_PROMPT_VERSION == "clarify-v3"  # Offline decision simulation.
-    assert ANSWER_PROMPT_VERSION == "answer-dialogue-v6"
-    assert PROMPT_ONLY_VERSION == "clarify-dialogue-v4"
+    assert ANSWER_PROMPT_VERSION == "answer-dialogue-v7"
+    assert PROMPT_ONLY_VERSION == "clarify-dialogue-v5"
+    assert DEMO_ANSWER_PROMPT_VERSION == "answer-dialogue-v6"
+    assert DEMO_PROMPT_ONLY_VERSION == "clarify-dialogue-v4"
     assert ANSWER_PROMPT_VERSION != ROUTER_VERSION

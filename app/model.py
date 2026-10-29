@@ -1,70 +1,77 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
 from urllib.parse import urlparse
 
 
-ANSWER_PROMPT_VERSION = "answer-dialogue-v6"
+ANSWER_PROMPT_VERSION = "answer-dialogue-v7"
 DECISION_PROMPT_VERSION = "clarify-v3"
-PROMPT_ONLY_VERSION = "clarify-dialogue-v4"
+PROMPT_ONLY_VERSION = "clarify-dialogue-v5"
+DEMO_ANSWER_PROMPT_VERSION = "answer-dialogue-v6"
+DEMO_PROMPT_ONLY_VERSION = "clarify-dialogue-v4"
 CLARIFICATION_MARKER = "【澄清提问】"
+DIALOGUE_OUTPUT_CONTRACT = "任务对话JSON输出协议v1"
 
 
 def answer_system_prompt(task: dict) -> str:
     fact_names = "；".join(slot["description"] for slot in task.get("slots", [])) or "以资料中涉及的个案条件为准"
     return (
-        "你是实验平台中的任务助手。请直接回答用户本轮提出的问题，结合完整对话理解省略的主语和后续补充。"
-        "同一轮有多个问题时逐项回答；用户问原因、区别、办理要求或方案建议时，给出相应解释和依据。"
-        "不要用邀请用户另选话题、反问想查哪一项或仅粘贴一张资料卡来替代回答。"
-        "只根据下列统一资料回答任务规则，不要编造规则。"
-        "如资料无法支持某结论，明确说出不确定之处。"
-        "不要添加参考资料未写明的提交渠道、材料格式、办理要求或资格条件；"
-        "请区分资格条件、申请材料和截止日期。"
-        "资料有冲突时，按文件的发布主体、适用批次、生效时间和更正关系判断，引用文件编号说明依据；"
-        "不要把自媒体、论坛说法当作正式规则。"
-        "解释规则时保留原文的关键对象、限制条件和否定词，不将相近概念当成同一个条件。"
-        "例如‘曾获得某项目名额’不能替换成‘曾参加活动’。"
-        "建议必须核对所有影响可行性的条件，未获知的个案事实不能默认满足。"
-        "请使用清楚、简洁的中文，不评价用户的表达能力。"
-        "个案事实只来自共同背景和用户在对话中明确提供的信息，不能猜测未提供的情况；"
-        "用户更正时以最新说明为准，不能把你的推测当作用户已经提供的事实。"
-        "用户询问方案时，根据已知情况给出建议与依据；尚不能确定的部分明确说明取决于什么条件。"
-        "回答保持简洁，优先把用户所问的各项结论说完整，避免重复复述题目和资料。"
-        "允许正常的多轮交流；不要泄露内部评分标准，也不要把虚构实验规则说成现实政策。\n"
-        "共同输出约定：若本条回复实际向用户索取缺失的个案事实，请以【澄清提问】开头；"
-        "此标记仅用于记录回复类别，不改变是否需要提问。普通回答不加标记。\n\n"
+        "你是实验平台中的任务助手，使用简洁中文回答用户本轮问题，结合完整对话理解指代和更正。\n"
+        "先判断本轮意图，按以下优先级处理：\n"
+        "1. 用户只是问候：简短回应，邀请提问，不索取个案事实。\n"
+        "2. 用户已说不知道、查不到或无法补充某项事实：不再索取该事实，"
+        "直接说明判断条件和不确定之处；不能一边说不追问，一边继续问。\n"
+        "3. 用户询问一般规则、报名流程（如‘怎么报名’）、材料、期限、渠道、差异或来源是否可靠："
+        "直接据资料回答，不要求个案事实。前文有未完成的个案推荐，也不改变本轮意图。\n"
+        "4. 用户请求个案推荐或继续补充个案事实：据已经明确的信息给出结论与依据，"
+        "尚缺的事实不能猜测，也不能把你之前的推测当作用户事实。\n"
+        "每轮尽量控制在300汉字内，多个问题逐项答全，避免每轮复述全套办理；不为缩短而遗漏所问结论。"
+        "不用另选话题或粘贴资料代替解答。"
+        "任务规则只来自统一资料，不添加资料未写明的条件、材料、格式、渠道或办理要求；未提供的细节直接说明未提供。"
+        "‘本人确认选择’不等于必须本人亲自递交，资料未要求的不得添加。"
+        "资料冲突时按发布主体、适用批次、生效时间和更正关系判断，引用文件编号说明依据。"
+        "保留规则的关键对象和否定词：‘获得过名额’不等于‘参加过活动’。"
+        "个案事实只来自共同背景和用户消息，更正以最新说明为准。"
+        "回答是非问题时，首句的‘是’或‘否’必须与后续结论和资料依据一致。"
+        "区分截止日期与包含钟点的完整截止时点；资料说只更正截止时间时，直接说明‘截止时点更正，其他规则继续有效’。"
+        "不评价用户表达能力，不泄露评分标准，不把实验虚构规则说成现实政策。\n\n"
         f"任务：{task['title']}\n"
         f"任务目标：{task.get('instructions', '')}\n"
         f"已公开给你和参与者的背景：{task['shared_context']}\n"
         f"用于个案判断的事实名称（不是事实取值）：{fact_names}。"
-        "请从共同背景和用户对话中核对取值；规则规定了某个条件，不等于该个案已经满足它。\n"
-        f"统一参考资料：{task['reference_text']}"
+        "规则规定了条件，不等于该个案已满足条件。\n"
+        f"统一参考资料：{task['reference_text']}\n\n"
+        f"{DIALOGUE_OUTPUT_CONTRACT}：只输出一个JSON对象，先写content，再根据正文填写kind。"
+        "content是非空的自然中文回复；kind只能是answer或clarification。"
+        "检查正文：凡是要求用户提供、补充或确认个案事实（包括先解释后说‘请确认’），kind必须为clarification；"
+        "没有这些请求就为answer，包含规则说明、条件性建议和已经确定的方案。"
+        "仅确认‘第一个’指哪段内容或用户想了解哪个话题时，kind为answer，不属于索取个案事实。"
+        '字段顺序及格式示例：{"content":"自然中文回复","kind":"answer"}。'
+        "不输出代码围栏或JSON以外的文字，content不加分类标记。"
     )
 
 
 def prompt_only_system_prompt(task: dict) -> str:
     return answer_system_prompt(task) + (
         "\n额外的澄清策略（主动澄清组）：\n"
-        "1. 先核对共同背景和全部对话。已经明确给出的事实绝不重复追问；用户更正以最新说明为准。\n"
-        "2. 用户请求针对具体个案的判断或方案建议，且缺少会改变结论的关键事实时，"
-        "本轮应先主动提问，而不是作确定判断。按资料中该条件的准确含义问，不得换成相近条件。"
-        "对每项必要个案事实，必须能在共同背景或用户消息中找到明确依据；找不到就是尚未提供，不能猜测。"
-        "‘准备参加’不说明此前是否获得过名额；希望多到场不说明每周实际最多能到场几次。"
-        "不要用列举所有可能情况或邀请另选查询主题来代替这次必要的澄清。\n"
-        "3. 需要澄清时，输出的第一个字符必须是标记【澄清提问】，后面用简短中文提出一个具体问题。"
-        "该标记供程序统计，不能省略。每轮最多问一个当前判断必需的问题，不依照固定顺序机械追问；"
-        "不要同时给出尚未确定的方案。若同轮还有不依赖该事实的子问题，可以简要回答。\n"
-        "4. 用户回答后，结合全部对话与统一资料继续完成原问题；仍缺少另一个必要事实时再问一个。"
-        "信息足够时直接给出结论与依据，不写标记，也不要为了澄清而继续提问。"
-        "用户表示不知道或无法补充时，说明限制并给出有依据的条件性建议，不循环追问同一个问题。\n"
-        "5. 用户只问规则、日期、材料或差异时，直接回答，不追问无关个案事实。"
-        "若只是问候或尚未提出任务问题，请简短回应并邀请用户提问，不主动追问资格条件。"
-        "不能因为用户用口语、短句或缺少专业词汇而追问。"
+        "共同规则的前3项优先：问候、用户无法补充、纯规则或一般流程问题均直接回答，不澄清个案事实。"
+        "只有本轮明确请求针对个案的判断或推荐，或正在回答该推荐的上一轮澄清，"
+        "且尚缺会改变结论、用户也没有表示无法提供的事实时，才先提问。"
+        "‘先不要假定’只禁止猜测，不表示事实无法补充；此时仍应询问一个缺失事实。"
+        "澄清时content只写关于一个尚缺事实的直接问句，不提其他缺失事实、不列条件方案。"
+        "已经明确给出的事实绝不重复追问；用户补充后继续完成原推荐，信息足够就给出方案。"
+        "用户无法补充时改给有依据的条件性建议。不能因为口语、短句或缺少专业词汇而追问。"
     )
 
 
 class ModelError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str = "model_error", *, http_status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
 
 
 class LiveProvider:
@@ -72,12 +79,32 @@ class LiveProvider:
         self.settings = settings
 
     def request_payload(self, messages: list[dict], *, temperature: float | None = None) -> dict:
+        dialogue = any(message.get("role") == "system" and DIALOGUE_OUTPUT_CONTRACT in message.get("content", "")
+                       for message in messages)
+        if dialogue:
+            # Replay assistant turns in the same format as the requested output.
+            # The UI stores plain text; unformatted history otherwise teaches
+            # the model to drop the response classification on later turns.
+            formatted = []
+            for message in messages:
+                if message.get("role") == "assistant":
+                    content = message["content"]
+                    clarification = content.startswith(CLARIFICATION_MARKER)
+                    if clarification:
+                        content = content[len(CLARIFICATION_MARKER):].strip()
+                    message = {**message, "content": json.dumps({
+                        "content": content, "kind": "clarification" if clarification else "answer",
+                    }, ensure_ascii=False)}
+                formatted.append(message)
+            messages = formatted
         payload = {
             "model": self.settings.model_name,
             "messages": messages,
             "temperature": self.settings.model_temperature if temperature is None else temperature,
             "max_tokens": self.settings.model_max_tokens,
         }
+        if dialogue:
+            payload["response_format"] = {"type": "json_object"}
         if urlparse(self.settings.model_base_url).hostname == "api.deepseek.com":
             payload["thinking"] = {"type": self.settings.model_thinking}
         return payload
@@ -87,25 +114,69 @@ class LiveProvider:
         url = f"{self.settings.model_base_url}/chat/completions"
         try:
             headers = {"Authorization": f"Bearer {self.settings.model_api_key}"} if self.settings.model_api_key else {}
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                )
-                response.raise_for_status()
-                body = response.json()
-            choice = body["choices"][0]
+            # Retry one transient transport/service failure within the original
+            # total budget. Never retry invalid credentials or partial content.
+            async with asyncio.timeout(90.0):
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    for attempt in range(2):
+                        try:
+                            response = await client.post(url, headers=headers, json=payload)
+                            response.raise_for_status()
+                            break
+                        except httpx.HTTPError as exc:
+                            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                            transient = isinstance(exc, httpx.TransportError) or status in {429, 500, 502, 503, 504}
+                            if attempt or not transient:
+                                raise
+                            retry_after = exc.response.headers.get("Retry-After", "1") if status is not None else "1"
+                            try:
+                                delay = max(1.0, float(retry_after))
+                            except ValueError:
+                                raise exc
+                            if delay > 10:
+                                raise
+                            await asyncio.sleep(delay)
+                    body = response.json()
+            if not isinstance(body, dict):
+                raise ModelError("模型返回了无效的回答结构")
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ModelError("模型返回了无效的回答结构")
+            choice = choices[0]
             if not isinstance(choice, dict):
                 raise ModelError("模型返回了无效的回答结构")
-            if choice.get("finish_reason") == "length":
-                raise ModelError("模型回答达到输出长度上限，未完成本轮回答")
-            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
+            if finish_reason == "length":
+                raise ModelError("模型回答达到输出长度上限，未完成本轮回答", "output_truncated")
+            # Some compatible services omit finish_reason or return null. Keep
+            # accepting their text, but never expose a known interrupted/tool
+            # response as a completed answer to the participant.
+            if finish_reason not in (None, "stop"):
+                raise ModelError("模型未正常完成本轮回答", "output_interrupted")
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                raise ModelError("模型返回了无效的回答结构")
+            content = message.get("content")
             if not isinstance(content, str) or not content.strip():
-                raise ModelError("模型返回了空内容")
-            return content.strip()
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ModelError(f"模型接口调用失败：{type(exc).__name__}") from exc
+                raise ModelError("模型返回了空内容", "empty_content")
+            content = content.strip()
+            if "response_format" in payload:
+                try:
+                    reply = json.loads(content)
+                except (ValueError, TypeError) as exc:
+                    raise ModelError("模型返回了无效的对话格式", "invalid_dialogue_json") from exc
+                if (not isinstance(reply, dict) or set(reply) != {"kind", "content"}
+                        or reply["kind"] not in ("answer", "clarification")
+                        or not isinstance(reply["content"], str) or not reply["content"].strip()
+                        or CLARIFICATION_MARKER in reply["content"]):
+                    raise ModelError("模型返回了无效的对话格式", "invalid_dialogue_fields")
+                text = reply["content"].strip()
+                return CLARIFICATION_MARKER + text if reply["kind"] == "clarification" else text
+            return content
+        except (httpx.HTTPError, TimeoutError, KeyError, IndexError, TypeError, ValueError) as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            code = "provider_timeout" if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else "provider_http_error" if isinstance(exc, httpx.HTTPError) else "invalid_response"
+            raise ModelError(f"模型接口调用失败：{type(exc).__name__}", code, http_status=status) from exc
 
 
 class DemoProvider:
