@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import csv
 import hashlib
 import io
@@ -27,7 +28,8 @@ from .translation_materials import (PROJECT_TITLE, DESIGN_VERSION, FORM_VERSION,
 from .translation_quality import RUBRIC, parse_rating
 from .translation_panel_quality import PANEL_VERSION, MODEL_MIN, MODEL_MAX, scoring_prompt, validate_panel, aggregate_model_ratings
 from .translation_model import BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt, parse_reply, demo_reply
-from .translation_purpose import data_purpose, purpose_metadata, record_purpose, select_purpose_records
+from .translation_purpose import (DEMONSTRATION_PURPOSE, data_purpose, purpose_metadata,
+    record_purpose, select_purpose_records)
 
 
 ELIGIBILITY_VERSION = 'cumt-undergraduate-v1'
@@ -118,12 +120,28 @@ def register_translation(app, settings, require_admin, optional_basic):
             rubric=RUBRIC,models=panel_config,prompts={c:dialogue_prompt(TASK,c) for c in CONDITIONS},
             scoring_prompt=scoring_prompt(TASK))
         material_id=_hash(material)
-        cohort_id=_hash(dict(material_id=material_id,model=model_config,mode=settings.study_mode,limits=limits,
+        # Presentation collection can precede panel setup. Keep the original
+        # empty-panel cohort stable while retaining the complete material snapshot.
+        collection_material_id=(_hash({**material,'models':[]})
+            if data_purpose(settings)==DEMONSTRATION_PURPOSE else material_id)
+        cohort_id=_hash(dict(material_id=collection_material_id,model=model_config,mode=settings.study_mode,limits=limits,
                             data_purpose=data_purpose(settings)))
         app.state.translation_provider=JSONModelProvider(connections['dialogue'])
         app.state.translation_judge_providers={c['id']:JSONModelProvider(c) for c in connections['judges']}
 
     refresh_configuration()
+
+    def evaluation_batch(snapshot, models, collection_cohort):
+        return _hash(dict(cohort_id=collection_cohort,scoring_prompt=snapshot['scoring_prompt'],
+            rubric=snapshot['rubric'],rubric_version=snapshot['versions']['rubric'],
+            panel_version=PANEL_VERSION,models=sorted(deepcopy(models),key=lambda model:model['id']),
+            temperature=0))
+
+    def current_evaluation_batch():
+        # Call under the same DB transaction that serializes configuration swaps.
+        if not registry.snapshot()['panel']['ready']:
+            return None
+        return evaluation_batch(material,panel_config,cohort_id)
 
     def backend_status():
         status=registry.snapshot()
@@ -198,6 +216,7 @@ def register_translation(app, settings, require_admin, optional_basic):
             band=row['band'], ability_score=row['ability_score'], condition=row['condition'],
             study_mode=row['study_mode'], record_kind=row['record_kind'], data_purpose=record_purpose(row), submission=row.get('submission'),
             assessment_status=row['assessment_status'], score=assessment.get('score'),
+            evaluation_batch_id=assessment.get('evaluation_batch_id'),
             needs_review=assessment.get('needs_review', False),
             turns=sum(m['role']=='assistant' for m in row['messages']), cohort_id=row['cohort_id'],
             current_cohort=row['cohort_id']==cohort_id, versions=row['versions'],
@@ -486,10 +505,14 @@ def register_translation(app, settings, require_admin, optional_basic):
                 raise HTTPException(409,'请先在“模型与API”中配置至少五个不同AI；不能用同一模型的多个角色代替')
             if row.get('evaluation_pending'):
                 raise HTTPException(409,'专家团正在评分，请稍后刷新')
-            row['evaluation_pending']=dict(attempt=attempt,started=time.time())
-            fixed_panel=row['material_snapshot']['models']
+            late_panel=(data_purpose(settings)==DEMONSTRATION_PURPOSE
+                        and record_purpose(row)==DEMONSTRATION_PURPOSE)
+            fixed_panel=deepcopy(panel_config if late_panel else row['material_snapshot']['models'])
             fixed_providers=dict(app.state.translation_judge_providers)
             prompt=row['material_snapshot']['scoring_prompt']
+            batch_id=evaluation_batch(row['material_snapshot'],fixed_panel,row['cohort_id'])
+            row['evaluation_pending']=dict(attempt=attempt,started=time.time(),
+                evaluation_batch_id=batch_id,evaluator_config=fixed_panel)
             save(db,row)
         async def judge(model):
             # Every distinct model gets exactly the same prompt and submission.
@@ -514,7 +537,8 @@ def register_translation(app, settings, require_admin, optional_basic):
                     current=json.loads(found['record_json'])
                     if (current.get('evaluation_pending') or {}).get('attempt')==attempt:
                         current['evaluation_pending']=None
-                        current['events'].append(dict(type='evaluation_cancelled',created_at=now_utc()))
+                        current['events'].append(dict(type='evaluation_cancelled',
+                            evaluation_batch_id=batch_id,evaluator_config=fixed_panel,created_at=now_utc()))
                         save(db,current)
             raise
         errors=[r for r in judged if isinstance(r,BaseException)]
@@ -530,6 +554,7 @@ def register_translation(app, settings, require_admin, optional_basic):
             current['evaluation_pending']=None
             if errors:
                 current['events'].append(dict(type='evaluation_failed',successes=len(judged)-len(errors),
+                    evaluation_batch_id=batch_id,evaluator_config=fixed_panel,
                     partial_ratings=[rating for rating in judged if not isinstance(rating,BaseException)],
                     failures=[dict(model_id=fixed_panel[index]['id'],code=result.code if isinstance(result,ModelError) else 'invalid_model_rating')
                               for index,result in enumerate(judged) if isinstance(result,BaseException)],
@@ -542,7 +567,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                     rating['seconds']=elapsed[rating['model_id']]
                     rating['reported_model']=next(r['reported_model'] for r in judged if r['model_id']==rating['model_id'])
                 assessment.update(evaluated_at=now_utc(),rubric_version=row['versions']['rubric'],
-                    evaluator_config=fixed_panel,panel_version=PANEL_VERSION)
+                    evaluator_config=fixed_panel,panel_version=PANEL_VERSION,evaluation_batch_id=batch_id)
                 current.update(assessment=assessment,assessment_status='completed')
                 save(db,current)
         if errors:
@@ -552,14 +577,22 @@ def register_translation(app, settings, require_admin, optional_basic):
     @app.get('/api/admin/translation/summary')
     def translation_summary(admin=Depends(require_admin)):
         with connect(settings.database_path) as db:
+            db.execute('BEGIN IMMEDIATE')
             all_rows=records(db)
-        rows=[r for r in select_purpose_records(all_rows,data_purpose(settings)) if r['cohort_id']==cohort_id and r['record_kind']=='participant']
+            active_cohort=cohort_id
+            active_batch=current_evaluation_batch()
+            active_backend=backend_status()
+        rows=[r for r in select_purpose_records(all_rows,data_purpose(settings)) if r['cohort_id']==active_cohort and r['record_kind']=='participant']
+        def in_current_batch(row):
+            assessment=row.get('assessment')
+            return bool(assessment and (data_purpose(settings)!=DEMONSTRATION_PURPOSE
+                or (active_batch is not None and assessment.get('evaluation_batch_id')==active_batch)))
         cells=[]
         for band in ('low','medium','high'):
             for condition in CONDITIONS:
                 group=[r for r in rows if r['band']==band and r['condition']==condition]
                 submitted=[r for r in group if r.get('ended_at')]
-                scored=[r for r in submitted if r.get('assessment')]
+                scored=[r for r in submitted if in_current_batch(r)]
                 cells.append(dict(band=band,condition=condition,n=len(group),submitted=len(submitted),scored=len(scored),
                     mean_score=round(statistics.mean(r['assessment']['score'] for r in scored),2) if scored else None,
                     mean_turns=round(statistics.mean(sum(m['role']=='assistant' for m in r['messages']) for r in submitted),2) if submitted else None,
@@ -568,12 +601,13 @@ def register_translation(app, settings, require_admin, optional_basic):
         def difference(band1,cond1,band2,cond2):
             first,second=indexed[band1,cond1],indexed[band2,cond2]
             return round(first['mean_score']-second['mean_score'],2) if first['scored']>=2 and second['scored']>=2 else None
-        return dict(study_mode=settings.study_mode,material_status=MATERIAL_STATUS,versions=versions,**backend_status(),**purpose_metadata(settings),
-            cohort_id=cohort_id,counts=dict(total=len(rows),submitted=sum(bool(r.get('ended_at')) for r in rows),
-                scored=sum(bool(r.get('assessment')) for r in rows),
-                needs_review=sum(bool((r.get('assessment') or {}).get('needs_review')) for r in rows),
+        return dict(study_mode=settings.study_mode,material_status=MATERIAL_STATUS,versions=versions,**active_backend,**purpose_metadata(settings),
+            cohort_id=active_cohort,evaluation_batch_id=active_batch,
+            counts=dict(total=len(rows),submitted=sum(bool(r.get('ended_at')) for r in rows),
+                scored=sum(in_current_batch(r) for r in rows),
+                needs_review=sum(in_current_batch(r) and bool(r['assessment'].get('needs_review')) for r in rows),
                 previews=sum(r['record_kind']=='researcher_preview' for r in all_rows),
-                other_cohorts=sum(r['cohort_id']!=cohort_id for r in all_rows)),cells=cells,
+                other_cohorts=sum(r['cohort_id']!=active_cohort for r in all_rows)),cells=cells,
             gaps=[dict(condition=c,high_low_gap=difference('high',c,'low',c)) for c in CONDITIONS],
             effects=[dict(band=b,clarification_gain=difference(b,'A',b,'S')) for b in ('low','medium','high')],
             study_phase='baseline_fairness',
@@ -600,6 +634,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                     trimmed=assessment.get('trimmed_model_ids',assessment.get('trimmed_expert_ids',[]))
                     data.append({**dict(id=r['id'],condition=r['condition'],band=r['band'],cohort_id=r['cohort_id'],
                         record_kind=r['record_kind'],data_purpose=record_purpose(r),study_mode=r['study_mode'],rubric_version=r['versions']['rubric']),
+                        'evaluation_batch_id':assessment.get('evaluation_batch_id'),
                         **rating,'total':totals.get(ident),'trimmed':ident in trimmed,
                         'evaluation_type':'legacy-role-panel' if legacy else 'distinct-model-panel'})
         filename=f'translation-{kind}.{format}'
@@ -609,10 +644,10 @@ def register_translation(app, settings, require_admin, optional_basic):
         # Flat analysis fields plus serialized audit structures, preserving zero and null.
         columns=(['id','created_at','ended_at','record_kind','data_purpose','study_mode','cohort_id','current_cohort','condition','band',
                  'age_band','education_stage','undergraduate_year','eligibility_version','translation_experience',
-                 'ability_score','assessment_status','score','needs_review','turns','duration_seconds','submission',
+                 'ability_score','assessment_status','evaluation_batch_id','score','needs_review','turns','duration_seconds','submission',
                  'answers','self_answers','ability','feedback','assessment','versions','model_config'] if kind=='records'
                  else ['id','condition','band','record_kind','data_purpose','cohort_id','study_mode','role','content','action','created_at'] if kind=='dialogue'
-                 else ['id','condition','band','record_kind','data_purpose','study_mode','cohort_id','rubric_version',
+                 else ['id','condition','band','record_kind','data_purpose','study_mode','cohort_id','rubric_version','evaluation_batch_id',
                        'model_id','label','model','base_url','weight','normalized_weight','scores','evidence',
                        'critical_errors','total','trimmed','seconds','reported_model','evaluation_type','expert_id'])
         buffer=io.StringIO(newline='')
