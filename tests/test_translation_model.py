@@ -1,11 +1,13 @@
 import json
+import hashlib
 from copy import deepcopy
 
 import pytest
 
 from app.model import ModelError
-from app.translation_materials import TASK
-from app.translation_model import audit_prompt, demo_reply, dialogue_prompt, parse_plan, parse_reply
+from app.translation_materials import PROMPT_VERSION, TASK
+from app.translation_model import (ACTIVE_CLARIFICATION_POLICY, BASELINE_CONDITIONS,
+    audit_prompt, demo_reply, dialogue_prompt, parse_plan, parse_reply)
 
 
 def plan(**changes):
@@ -128,6 +130,32 @@ def test_conditions_add_clarification_then_accessible_scaffolding_without_abilit
     assert "不能把未知信息或最可能的解释当成事实" in optimized
     with pytest.raises(ValueError):
         dialogue_prompt(TASK, "unknown")
+
+
+def test_active_priority_policy_follows_json_contract_and_does_not_enable_optimizer():
+    active = dialogue_prompt(TASK, "A")
+    assert active.endswith("\n" + ACTIVE_CLARIFICATION_POLICY)
+    assert active.index('仅输出JSON对象：{"content"') < active.index(ACTIVE_CLARIFICATION_POLICY)
+    assert ACTIVE_CLARIFICATION_POLICY not in dialogue_prompt(TASK, "S")
+    assert ACTIVE_CLARIFICATION_POLICY not in dialogue_prompt(TASK, "O")
+    assert tuple(BASELINE_CONDITIONS) == ("S", "A")
+    assert "优化模块" not in active and "两三个候选解释" not in active
+    assert PROMPT_VERSION == "translation-dialogue-v2"
+
+
+def test_active_policy_prioritizes_one_missing_context_question_but_stops_when_user_cannot_supply_it():
+    active = dialogue_prompt(TASK, "A")
+    assert "不要用常见用法的推断替代尚未确认的作品背景" in active
+    assert "本轮必须只提出一个由你自行选择的最重要的具体问题" in active
+    assert "kind必须为clarification；不要同时给整段译文" in active
+    assert "用户明确无法补充时，必须据已知信息给完整译文，kind为answer" in active
+    assert "已经确认的信息不重复问" in active
+
+
+def test_direct_translation_control_prompt_is_byte_identical_after_active_policy_revision():
+    # Frozen before the v2 A-only policy change: the S control must remain intact.
+    assert hashlib.sha256(dialogue_prompt(TASK, "S").encode()).hexdigest() == (
+        "1fb43d1cba8a47041c3f46cc2b6303d27d655eb1ce9d92435c8cfdaf1dc2aa0d")
 
 
 def test_demo_never_reads_hidden_reference_and_same_candidate_is_used_across_arms():

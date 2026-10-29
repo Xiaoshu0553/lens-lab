@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 import httpx
 
 from app.config import load_dotenv
-from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK_VERSION, score_form
+from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK_VERSION, PROMPT_VERSION, score_form
 
 GENERATOR_VERSION = "translation-http-presentation-v1"
 FORMAT_PROTOCOL = "json-content-field-v2"
@@ -209,17 +209,28 @@ def open_manifest(path: Path, base_url: str, count: int, seed: int, pace_seconds
             raise SampleError("The manifest belongs to a different origin, plan, generator or material version")
         if len(value.get("samples", [])) != count:
             raise SampleError("The manifest sample count is damaged")
+        validate_manifest_prompt(value)
+        value["prompt_version"] = PROMPT_VERSION
         return value
     result = {
         "generator_version": GENERATOR_VERSION, "base_url": base_url, "count": count, "seed": seed,
         "pace_seconds": pace_seconds,
-        "form_version": FORM_VERSION, "task_version": TASK_VERSION, "created_at": utc_now(),
+        "form_version": FORM_VERSION, "task_version": TASK_VERSION, "prompt_version": PROMPT_VERSION,
+        "created_at": utc_now(),
         "method": METHOD, "target_strata": quotas(count), "samples": make_plans(count, seed),
     }
     for plan in result["samples"]:
         plan["pace_total_seconds"] = round(random.Random(plan["profile_seed"] + 101).uniform(.7, 1.8) * pace_seconds, 2)
     save_manifest(path, result)
     return result
+
+
+def validate_manifest_prompt(manifest: dict) -> None:
+    preflight = manifest.get("preflight")
+    recorded = preflight.get("versions", {}).get("prompt") if isinstance(preflight, dict) else None
+    version = manifest.get("prompt_version") if "prompt_version" in manifest else recorded
+    if version != PROMPT_VERSION or (preflight is not None and recorded != PROMPT_VERSION):
+        raise SampleError("The manifest prompt version differs from this generator; keep the existing batch unchanged and use a new manifest and seed")
 
 
 class Platform:
@@ -266,11 +277,12 @@ class Platform:
             raise SampleError("The destination has not deployed the current undergraduate eligibility schema")
         form = self.request("GET", "/api/translation/form")
         if (form.get("version") != FORM_VERSION or info.get("versions", {}).get("task") != TASK_VERSION
+                or info.get("versions", {}).get("prompt") != PROMPT_VERSION
                 or [(item.get("id"), item.get("options")) for item in form.get("items", [])]
                 != [(item["id"], item["options"]) for item in FORM_ITEMS]
                 or [(item.get("id"), item.get("options")) for item in form.get("self_items", [])]
                 != [(item["id"], item["options"]) for item in SELF_ITEMS]):
-            raise SampleError("The destination questionnaire or translation task differs from this generator")
+            raise SampleError("The destination questionnaire, translation task or prompt version differs from this generator")
         config = self.request("GET", "/api/admin/translation/models", admin=True)
         dialogue = config.get("dialogue", {})
         provider = urlsplit(dialogue.get("base_url", ""))
@@ -406,6 +418,8 @@ def extract_translation(message: dict) -> str:
 
 
 def _validate_record(record: dict, plan: dict, *, completed: bool) -> None:
+    if record.get("versions", {}).get("prompt") != PROMPT_VERSION:
+        raise SampleError(f"{plan['sample_id']}: server record prompt version differs from this generator")
     if (record.get("data_purpose") != "demonstration" or record.get("record_kind") != "participant"
             or record.get("study_mode") != "pilot" or record.get("condition") not in {"S", "A"}
             or record.get("band") != plan["target_band"] or record.get("ability_score") != plan["ability"]["score"]):
@@ -554,13 +568,36 @@ def run_sample(platform: Platform, manifest: dict, plan: dict, persist) -> None:
     persist()
 
 
+def _first_reply_action(record: dict, plan: dict) -> str:
+    """Audit the actual first reply to the script's original, non-final request."""
+    if not plan.get("rounds"):
+        raise SampleError(f"{plan['sample_id']}: the persisted first request is missing")
+    first = plan["rounds"][0]
+    expected, shared = make_message({**plan, "provided_card_ids": []},
+        {"task": record.get("task", {}), "messages": []}, 1, final=False)
+    if (first.get("content") != expected or first.get("card_ids") != shared
+            or len(shared) > 2 or first.get("final_requested") is not False):
+        raise SampleError(f"{plan['sample_id']}: first request is not the generator's default request with at most two background cards; original records were retained")
+    reply = _round_reply(record, first, 0)
+    action = reply.get("action")
+    return action if isinstance(action, str) else "missing"
+
+
 def verify_batch(platform: Platform, manifest: dict) -> dict:
+    validate_manifest_prompt(manifest)
     conditions, strata, ages, years, turns = Counter(), Counter(), Counter(), Counter(), Counter()
+    first_actions = {condition: Counter() for condition in ("S", "A")}
+    action_failures = []
     for plan in manifest["samples"]:
         if plan.get("status") != "completed" or not plan.get("session_id"):
             raise SampleError("The batch contains an unfinished sample")
         record = platform.record(plan["session_id"])
         _validate_record(record, plan, completed=True)
+        action = _first_reply_action(record, plan)
+        first_actions[record["condition"]][action] += 1
+        expected_action = "clarification" if record["condition"] == "A" else "answer"
+        if action != expected_action:
+            action_failures.append(f"{plan['sample_id']}:{record['condition']}:{action}")
         conditions[record["condition"]] += 1
         strata[record["band"]] += 1
         ages[record["age_band"]] += 1
@@ -568,7 +605,13 @@ def verify_batch(platform: Platform, manifest: dict) -> dict:
         turns[sum(message["role"] == "assistant" for message in record["messages"])] += 1
     result = {"verified_at": utc_now(), "count": len(manifest["samples"]), "conditions": dict(conditions),
               "strata": dict(strata), "ages": dict(ages), "undergraduate_years": dict(years),
-              "dialogue_turns": dict(turns), "scores_generated": 0}
+              "dialogue_turns": dict(turns), "scores_generated": 0, "prompt_version": PROMPT_VERSION,
+              "first_reply_actions": {condition: dict(counts) for condition, counts in first_actions.items()}}
+    if action_failures:
+        raise SampleError("First-reply protocol failed (A requires clarification; S requires answer); "
+            "original records and actions were retained. Counts: "
+            + json.dumps(result["first_reply_actions"], sort_keys=True)
+            + "; samples: " + ", ".join(action_failures))
     if dict(strata) != manifest["target_strata"]:
         raise SampleError("The server's ability strata do not match the predeclared presentation plan")
     if manifest["count"] == 24 and conditions != Counter({"S": 12, "A": 12}):

@@ -1,12 +1,13 @@
 """Offline checks of sampling and HTTP recovery; these are not live API evidence."""
 from collections import Counter
+from copy import deepcopy
 import importlib.util
 import json
 from pathlib import Path
 
 import pytest
 
-from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK_VERSION, public_form, score_form
+from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK_VERSION, PROMPT_VERSION, public_form, public_task, score_form
 
 SPEC = importlib.util.spec_from_file_location("translation_sample_generator", Path(__file__).parents[1] / "scripts" / "generate_translation_samples.py")
 generator = importlib.util.module_from_spec(SPEC)
@@ -57,6 +58,7 @@ def test_manifest_is_atomic_private_resumable_and_does_not_store_execution_crede
     generator.save_manifest(path, original)
     restored = generator.open_manifest(path, "https://study.example.org", 24, 7)
     assert restored == original
+    assert restored["prompt_version"] == PROMPT_VERSION
     assert path.stat().st_mode & 0o777 == 0o600
     assert "PRIVATE-ADMIN-SECRET" not in path.read_text()
     assert "PRIVATE-INVITE-SECRET" not in path.read_text()
@@ -77,10 +79,68 @@ def test_manifest_lock_prevents_a_concurrent_writer_and_releases_on_exit(tmp_pat
         pass
 
 
+def test_legacy_manifest_without_top_level_prompt_version_recovers_only_from_matching_preflight(tmp_path):
+    path = tmp_path / "batch.json"
+    value = generator.open_manifest(path, "https://study.example.org", 24, 7)
+    del value['prompt_version']
+    value['preflight'] = {'versions': {'prompt': PROMPT_VERSION}}
+    generator.save_manifest(path, value)
+    restored = generator.open_manifest(path, "https://study.example.org", 24, 7)
+    assert restored['prompt_version'] == PROMPT_VERSION
+    assert restored['samples'] == value['samples']
+
+
+@pytest.mark.parametrize('top_level,preflight_version', [
+    ('translation-dialogue-v1', 'translation-dialogue-v2'),
+    ('translation-dialogue-v2', 'translation-dialogue-v1'),
+    (None, 'translation-dialogue-v2'),
+    ('absent', 'translation-dialogue-v1'),
+    ('absent', None),
+])
+def test_manifest_resume_rejects_old_unknown_or_conflicting_prompt_versions_without_rewriting(tmp_path, monkeypatch, top_level, preflight_version):
+    path = tmp_path / 'batch.json'
+    value = generator.open_manifest(path, 'https://study.example.org', 24, 7)
+    if top_level == 'absent':
+        del value['prompt_version']
+    else:
+        value['prompt_version'] = top_level
+    if preflight_version is not None:
+        value['preflight'] = {'versions': {'prompt': preflight_version}}
+    generator.save_manifest(path, value)
+    original_bytes = path.read_bytes()
+    monkeypatch.setattr(generator, 'PROMPT_VERSION', 'translation-dialogue-v2')
+    with pytest.raises(generator.SampleError, match='prompt version'):
+        generator.open_manifest(path, 'https://study.example.org', 24, 7)
+    assert path.read_bytes() == original_bytes
+
+
+def test_v1_manifest_cannot_resume_under_v2_even_after_current_preflight_succeeds(tmp_path, monkeypatch):
+    path = tmp_path / 'batch.json'
+    value = generator.open_manifest(path, 'https://study.example.org', 24, 7)
+    del value['prompt_version']
+    value['preflight'] = {'versions': {'prompt': 'translation-dialogue-v1'}}
+    value['samples'][0]['session_id'] = 'real-existing-v1-session'
+    generator.save_manifest(path, value)
+    original_bytes = path.read_bytes()
+    monkeypatch.setattr(generator, 'PROMPT_VERSION', 'translation-dialogue-v2')
+    monkeypatch.setenv('ADMIN_PASSWORD', 'test-only')
+    class FixturePlatform:
+        def __init__(self, *args, **kwargs):
+            pass
+        def preflight(self):
+            return {'versions': {'prompt': 'translation-dialogue-v2'}}
+        def close(self):
+            pass
+    monkeypatch.setattr(generator, 'Platform', FixturePlatform)
+    monkeypatch.setattr(generator, 'execute_batch', lambda *args: pytest.fail('old v1 sessions must not be resumed'))
+    assert generator.main(['--base-url', 'https://study.example.org', '--manifest', str(path), '--seed', '7']) == 1
+    assert path.read_bytes() == original_bytes
+
+
 def _preflight_info():
     return {"data_purpose": "demonstration", "demonstration_mode": True,
             "study_mode": "pilot", "dialogue_backend": "model_api", "access_code_required": True,
-            "versions": {"form": FORM_VERSION, "task": TASK_VERSION},
+            "versions": {"form": FORM_VERSION, "task": TASK_VERSION, "prompt": PROMPT_VERSION},
             "participant_scope": {"education_stage": "bachelor", "minimum_age": 18,
                                   "age_bands": ["18", "19", "20", "21", "22", "23-plus"],
                                   "undergraduate_years": ["year-1", "year-2", "year-3", "year-4", "year-5-plus"]}}
@@ -106,6 +166,18 @@ def test_preflight_refuses_research_data_or_rule_simulation_before_any_mutation(
     with pytest.raises(generator.SampleError):
         platform.preflight()
     assert all(method == "GET" for method, _, _ in calls)
+
+
+@pytest.mark.parametrize('version', [None, 'translation-dialogue-v1'])
+def test_preflight_requires_the_exact_current_prompt_version_before_generation(monkeypatch, version):
+    info = _preflight_info()
+    info['versions']['prompt'] = version
+    monkeypatch.setattr(generator, 'PROMPT_VERSION', 'translation-dialogue-v2')
+    platform, calls = _platform_for_preflight(info)
+    with pytest.raises(generator.SampleError, match='prompt version'):
+        platform.preflight()
+    assert all(method == 'GET' for method, _, _ in calls)
+    assert not any(path == '/api/admin/translation/models' for _, path, _ in calls)
 
 
 def test_preflight_requires_current_undergraduate_scope_and_a_remote_cloud_model():
@@ -284,6 +356,7 @@ def test_full_http_protocol_submits_the_exact_final_reply_and_resume_makes_no_ne
                 self.row = {**deepcopy(plan["start_payload"]), "id": "fixture-session",
                             "data_purpose": "demonstration", "record_kind": "participant", "study_mode": "pilot",
                             "condition": "A", "band": plan["target_band"], "ability_score": plan["ability"]["score"],
+                            "versions": {"prompt": PROMPT_VERSION},
                             "created_at": "2026-10-30T00:00:00+00:00", "ended_at": None,
                             "draft": "", "submission": None, "messages": [], "events": [],
                             "completed_request_ids": [], "pending_reply": False, "remaining_seconds": 1200,
@@ -441,3 +514,78 @@ def test_legacy_request_without_conclusive_failure_is_not_rewritten():
         generator.repair_final_format(UnresolvedFixture(), {"seed": 1}, {"session_id": "session", "index": 1}, turn, 2,
                                       lambda: pytest.fail("unconfirmed request must not be changed"))
     assert turn["request_id"] == "unknown-pending" and turn["content"] == "原文"
+
+
+def _completed_batch_fixture():
+    """Offline protocol rows with real-shaped envelopes, not live API results."""
+    plans = generator.make_plans(24, 2026103002)
+    manifest = {'seed': 2026103002, 'count': 24, 'prompt_version': PROMPT_VERSION,
+                'target_strata': generator.quotas(24), 'samples': plans}
+    records = {}
+    for index, plan in enumerate(plans):
+        condition = 'S' if index % 2 == 0 else 'A'
+        action = 'answer' if condition == 'S' else 'clarification'
+        task = public_task()
+        first, cards = generator.make_message(plan, {'task': task, 'messages': []}, 1, final=False)
+        first_reply = {'role': 'assistant', 'action': action, 'content': '请确认人物关系。' if action == 'clarification' else TRANSLATION}
+        final_reply = {'role': 'assistant', 'action': 'answer',
+                       'content': generator.FINAL_BEGIN + TRANSLATION + generator.FINAL_END}
+        plan.update(session_id=f'offline-protocol-{index}', status='completed', submission=TRANSLATION,
+                    provided_card_ids=cards, rounds=[
+                        {'content': first, 'card_ids': cards, 'final_requested': False,
+                         'request_id': f'first-{index}', 'reply': deepcopy(first_reply)},
+                        {'content': '最终请求', 'card_ids': [], 'final_requested': True,
+                         'request_id': f'final-{index}', 'reply': deepcopy(final_reply)}])
+        records[plan['session_id']] = {
+            **deepcopy(plan['start_payload']), 'data_purpose': 'demonstration', 'record_kind': 'participant',
+            'study_mode': 'pilot', 'condition': condition, 'band': plan['target_band'],
+            'ability_score': plan['ability']['score'], 'versions': {'prompt': PROMPT_VERSION},
+            'task': task, 'submission': TRANSLATION,
+            'created_at': '2026-10-30T00:00:00+00:00', 'ended_at': '2026-10-30T00:02:00+00:00',
+            'messages': [{'role': 'user', 'content': first}, first_reply,
+                         {'role': 'user', 'content': '最终请求'}, final_reply],
+            'events': [{'type': 'reply', 'seconds': 1.25}, {'type': 'reply', 'seconds': 1.5}],
+        }
+    class FixturePlatform:
+        def record(self, sid):
+            return deepcopy(records[sid])
+    return manifest, records, FixturePlatform()
+
+
+def test_verify_batch_reports_real_first_reply_actions_per_condition():
+    manifest, records, platform = _completed_batch_fixture()
+    original = deepcopy((manifest, records))
+    result = generator.verify_batch(platform, manifest)
+    assert result['count'] == 24 and result['prompt_version'] == PROMPT_VERSION
+    assert result['first_reply_actions'] == {'S': {'answer': 12}, 'A': {'clarification': 12}}
+    assert result['dialogue_turns'] == {2: 24} and result['scores_generated'] == 0
+    assert (manifest, records) == original
+
+
+@pytest.mark.parametrize('condition,wrong_action', [('A', 'answer'), ('S', 'clarification')])
+def test_first_reply_protocol_mismatch_is_reported_without_relabeling_or_replacing_data(condition, wrong_action):
+    manifest, records, platform = _completed_batch_fixture()
+    row = next(row for row in records.values() if row['condition'] == condition)
+    row['messages'][1]['action'] = wrong_action
+    # The manifest still has the old action: verification must use server truth.
+    original = deepcopy((manifest, records))
+    with pytest.raises(generator.SampleError, match='original records and actions were retained') as error:
+        generator.verify_batch(platform, manifest)
+    assert 'Counts:' in str(error.value) and wrong_action in str(error.value)
+    assert (manifest, records) == original
+
+
+def test_verification_rejects_a_changed_first_request_instead_of_exempting_it_from_action_checks():
+    manifest, records, platform = _completed_batch_fixture()
+    plan = manifest['samples'][0]
+    plan['rounds'][0]['content'] += '\n我无法补充其他信息。'
+    records[plan['session_id']]['messages'][0]['content'] = plan['rounds'][0]['content']
+    with pytest.raises(generator.SampleError, match="not the generator's default request"):
+        generator.verify_batch(platform, manifest)
+
+
+def test_current_manifest_cannot_verify_old_prompt_server_records():
+    manifest, records, platform = _completed_batch_fixture()
+    next(iter(records.values()))['versions']['prompt'] = PROMPT_VERSION + '-different'
+    with pytest.raises(generator.SampleError, match='server record prompt version'):
+        generator.verify_batch(platform, manifest)
