@@ -20,6 +20,7 @@ from app.model import ModelError
 from app.translation_connections import ConnectionRegistry, JSONModelProvider, clean_connection
 from app.translation_quality import RUBRIC
 from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION
+from app.translation_model import parse_reply
 from test_flow import auth, settings
 from translation_multi_model_helpers import configure_panel, panel_models
 
@@ -135,6 +136,153 @@ def test_cloud_request_uses_configured_model_json_and_does_not_follow_redirects(
     assert payload["temperature"]==0 and payload["max_tokens"]==4096
     assert str(received[0].url)=="https://api.example.invalid/v1/chat/completions"
     assert initialized[0]["follow_redirects"] is False
+
+
+def test_json_whitespace_stop_recovers_once_without_mutating_messages_or_model_configuration(monkeypatch):
+    received=[]
+    expected='{"kind":"answer","content":"这是模型返回的译文。"}'
+    def handler(request):
+        received.append(json.loads(request.content))
+        content=' '*137 if len(received)==1 else expected
+        return httpx.Response(200,json={"model":"distinct-ai-one","choices":[{
+            "finish_reason":"stop","message":{"content":content,"reasoning_content":"不能代替最终正文"}}]})
+    patch_http(monkeypatch,handler)
+    provider=JSONModelProvider(connection())
+    messages=[{"role":"system","content":"请输出规定结构的JSON对象。"},{"role":"user","content":"只给译文，不要解释。"}]
+    original=deepcopy(messages);configuration=deepcopy(provider.connection)
+    async def run():
+        result=await provider.complete(messages,temperature=.25)
+        assert provider.format_retry_count==1
+        return result
+    result=asyncio.run(run())
+    assert result==expected and parse_reply(result)['action']=='answer'
+    assert len(received)==2 and received[0]['messages']==original
+    assert received[1]['messages'][:-1]==original
+    reminder=received[1]['messages'][-1]
+    assert reminder['role']=='system' and 'JSON 字符串字段' in reminder['content'] and '不要输出空白' in reminder['content']
+    assert {key:value for key,value in received[0].items() if key!='messages'}=={key:value for key,value in received[1].items() if key!='messages'}
+    assert received[1]['temperature']==.25 and received[1]['model']==configuration['model']
+    assert messages==original and provider.connection==configuration
+    assert '不能代替最终正文' not in result
+
+
+def test_json_whitespace_recovery_has_no_third_format_attempt_or_reasoning_fallback(monkeypatch):
+    received=[]
+    def handler(request):
+        received.append(request)
+        return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{
+            "content":" \n\t ","reasoning_content":'{"kind":"answer","content":"不是最终正文"}'}}]})
+    patch_http(monkeypatch,handler)
+    provider=JSONModelProvider(connection())
+    async def run():
+        with pytest.raises(ModelError) as error:
+            await provider.complete([{"role":"user","content":"translate"}])
+        assert error.value.code=='empty_content' and provider.format_retry_count==1
+    asyncio.run(run())
+    assert len(received)==2
+
+
+def test_additional_protocol_reminder_is_not_resent_after_a_transport_error(monkeypatch):
+    received=[]
+    def handler(request):
+        received.append(request)
+        if len(received)==1:
+            return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{"content":" "}}]})
+        return httpx.Response(503,text='upstream temporarily unavailable')
+    patch_http(monkeypatch,handler)
+    async def run():
+        provider=JSONModelProvider(connection())
+        with pytest.raises(ModelError) as error:
+            await provider.complete([{'role':'user','content':'translate'}])
+        assert error.value.code=='provider_http_error' and error.value.http_status==503
+        assert provider.format_retry_count==1
+    asyncio.run(run())
+    assert len(received)==2
+
+
+@pytest.mark.parametrize('finish,refusal,json_mode,content',[
+    ('length',None,True,' '),('content_filter',None,True,' '),
+    ('stop','request refused',True,' '),(None,None,True,' '),
+    ('stop',None,False,' '),('stop',None,True,None),
+])
+def test_format_recovery_excludes_interruption_refusal_non_json_and_missing_final_content(monkeypatch,finish,refusal,json_mode,content):
+    received=[]
+    def handler(request):
+        received.append(request)
+        return httpx.Response(200,json={"choices":[{"finish_reason":finish,"message":{
+            "content":content,"refusal":refusal,"reasoning_content":"reasoning is not the final answer"}}]})
+    patch_http(monkeypatch,handler)
+    provider=JSONModelProvider({**connection(),'json_mode':json_mode})
+    async def run():
+        with pytest.raises(ModelError):
+            await provider.complete([{"role":"user","content":"translate"}])
+        assert provider.format_retry_count==0
+    asyncio.run(run())
+    assert len(received)==1
+
+
+def test_recovered_json_still_requires_the_application_reply_schema(monkeypatch):
+    received=[]
+    def handler(request):
+        received.append(request)
+        return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{
+            "content":" " if len(received)==1 else '{"content":"缺少kind字段。"}'}}]})
+    patch_http(monkeypatch,handler)
+    async def run():
+        provider=JSONModelProvider(connection())
+        raw=await provider.complete([{"role":"user","content":"translate"}])
+        assert provider.format_retry_count==1
+        with pytest.raises(ModelError) as error:
+            parse_reply(raw)
+        assert error.value.code=='invalid_translation_reply'
+    asyncio.run(run())
+    assert len(received)==2
+
+
+def test_format_attempts_share_one_total_timeout_budget(monkeypatch):
+    received=[];deadlines=[]
+    original_timeout=asyncio.timeout
+    def shortened_timeout(seconds):
+        deadlines.append(seconds)
+        return original_timeout(.02)
+    async def handler(request):
+        received.append(request)
+        if len(received)==1:
+            return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{"content":" "}}]})
+        await asyncio.Future()  # The shared deadline must cancel this response.
+    patch_http(monkeypatch,handler)
+    monkeypatch.setattr('app.translation_connections.asyncio.timeout',shortened_timeout)
+    async def run():
+        provider=JSONModelProvider(connection())
+        with pytest.raises(ModelError) as error:
+            await provider.complete([{"role":"user","content":"translate"}])
+        assert error.value.code=='provider_timeout' and provider.format_retry_count==1
+    asyncio.run(run())
+    assert deadlines==[120] and len(received)==2
+
+
+def test_format_retry_diagnostics_are_isolated_for_concurrent_calls_and_reset_per_call(monkeypatch):
+    async def run():
+        recovering=asyncio.Event();release=asyncio.Event();received=[]
+        async def handler(request):
+            payload=json.loads(request.content);received.append(payload)
+            if payload['messages'][0]['content']=='recover':
+                if len(payload['messages'])==1:
+                    return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{"content":" "}}]})
+                recovering.set();await release.wait()
+            else:
+                await recovering.wait();release.set()
+            return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{"content":'{"ok":true}'}}]})
+        patch_http(monkeypatch,handler)
+        provider=JSONModelProvider(connection())
+        async def call(message):
+            await provider.complete([{'role':'user','content':message}])
+            return provider.format_retry_count
+        counts=await asyncio.gather(call('recover'),call('plain'))
+        assert counts==[1,0] and provider.format_retry_count==0
+        assert await call('plain')==0
+        assert len(received)==4
+    asyncio.run(run())
 
 
 def test_local_ollama_uses_native_endpoint_no_proxy_and_separates_final_content(monkeypatch):

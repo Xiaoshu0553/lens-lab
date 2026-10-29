@@ -6,6 +6,7 @@ responses. Public configuration and successful HTTP probes are distinct states.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
@@ -27,6 +28,10 @@ from .translation_panel_quality import MODEL_MIN, MODEL_MAX, validate_panel
 
 
 _LOCAL = {'localhost','127.0.0.1','::1'}
+_JSON_FORMAT_REMINDER = (
+    '请继续遵守系统已有的 JSON 结构。用户对正文格式的要求只约束相应 JSON 字符串字段；'
+    '顶层仍须输出完整 JSON 对象，不要输出空白。不要添加、删改既有结构要求的字段。'
+)
 
 
 def _fingerprint(value):
@@ -93,18 +98,26 @@ class JSONModelProvider:
     def __init__(self, connection):
         self.connection=deepcopy(connection)
         self.last_response_model=None
+        self._format_retry_count=ContextVar(f'json_format_retry_count_{id(self)}',default=0)
+
+    @property
+    def format_retry_count(self):
+        """Diagnostic for the most recent call in this async task's context."""
+        return self._format_retry_count.get()
 
     async def complete(self,messages,*,temperature=None):
+        self._format_retry_count.set(0)
         cfg=self.connection
         endpoint=urlsplit(cfg['base_url'])
         host=endpoint.hostname
         native_ollama=host in _LOCAL and endpoint.port==11434
-        payload=dict(model=cfg['model'],messages=messages,temperature=cfg['temperature'] if temperature is None else temperature,
+        original_messages=deepcopy(messages)
+        payload=dict(model=cfg['model'],messages=original_messages,temperature=cfg['temperature'] if temperature is None else temperature,
                      max_tokens=cfg['max_tokens'],stream=False)
         if cfg['json_mode']:
             payload['response_format']={'type':'json_object'}
         if native_ollama:
-            payload=dict(model=cfg['model'],messages=messages,stream=False,
+            payload=dict(model=cfg['model'],messages=original_messages,stream=False,
                          think=cfg['thinking']=='enabled',
                          options=dict(temperature=cfg['temperature'] if temperature is None else temperature,
                                       num_predict=cfg['max_tokens']))
@@ -120,40 +133,57 @@ class JSONModelProvider:
                 # Loopback must bypass system HTTP proxies. Remote calls retain
                 # the user's configured network proxy.
                 async with httpx.AsyncClient(timeout=120,trust_env=host not in _LOCAL,follow_redirects=False) as client:
-                    for attempt in range(2):
-                        try:
-                            request_url=(f'{endpoint.scheme}://{endpoint.netloc}/api/chat' if native_ollama
-                                         else cfg['base_url']+'/chat/completions')
-                            response=await client.post(request_url,json=payload,headers=headers)
-                            response.raise_for_status()
-                            break
-                        except httpx.HTTPError as exc:
-                            status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
-                            if attempt or not (isinstance(exc,httpx.TransportError) or status in {429,500,502,503,504}):
-                                raise
-                            await asyncio.sleep(1)
-                    body=response.json()
-            if native_ollama:
-                if not isinstance(body,dict) or not body.get('done') or body.get('done_reason')!='stop':
-                    raise ModelError('本地模型未正常结束或输出达到上限','output_interrupted')
-                message=body.get('message')
-            elif not isinstance(body,dict) or not isinstance(body.get('choices'),list) or not body['choices']:
-                raise ModelError('模型返回结构无效','invalid_response')
-            else:
-                choice=body['choices'][0]
-                if not isinstance(choice,dict) or choice.get('finish_reason') not in (None,'stop'):
-                    raise ModelError('模型输出被截断或未正常结束，请调整输出上限后重试','output_interrupted')
-                message=choice.get('message')
-            if not isinstance(message,dict) or not isinstance(message.get('content'),str) or not message['content'].strip():
-                raise ModelError('模型未返回最终正文','empty_content')
-            content=message['content'].strip()
-            if len(content)>50000:
-                raise ModelError('模型输出超过允许长度','output_too_long')
-            reported=body.get('model')
-            self.last_response_model=(reported if isinstance(reported,str)
-                and re.fullmatch(r'[A-Za-z0-9._:/@+\-]{1,240}',reported)
-                and not (cfg.get('api_key') and cfg['api_key'] in reported) else None)
-            return content
+                    # Both format attempts and transport retries share this one
+                    # 120-second deadline. A format recovery never gets a new budget.
+                    for format_attempt in range(2):
+                        # Preserve the original transport retry, but send the
+                        # additional protocol reminder at most once in total.
+                        for attempt in range(2 if not format_attempt else 1):
+                            try:
+                                request_url=(f'{endpoint.scheme}://{endpoint.netloc}/api/chat' if native_ollama
+                                             else cfg['base_url']+'/chat/completions')
+                                response=await client.post(request_url,json=payload,headers=headers)
+                                response.raise_for_status()
+                                break
+                            except httpx.HTTPError as exc:
+                                status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+                                if format_attempt or attempt or not (isinstance(exc,httpx.TransportError) or status in {429,500,502,503,504}):
+                                    raise
+                                await asyncio.sleep(1)
+                        body=response.json()
+                        if native_ollama:
+                            if not isinstance(body,dict) or not body.get('done') or body.get('done_reason')!='stop':
+                                raise ModelError('本地模型未正常结束或输出达到上限','output_interrupted')
+                            message=body.get('message')
+                            normal_stop=True
+                        elif not isinstance(body,dict) or not isinstance(body.get('choices'),list) or not body['choices']:
+                            raise ModelError('模型返回结构无效','invalid_response')
+                        else:
+                            choice=body['choices'][0]
+                            if not isinstance(choice,dict) or choice.get('finish_reason') not in (None,'stop'):
+                                raise ModelError('模型输出被截断或未正常结束，请调整输出上限后重试','output_interrupted')
+                            message=choice.get('message')
+                            normal_stop=choice.get('finish_reason')=='stop'
+                        if not isinstance(message,dict) or not isinstance(message.get('content'),str) or not message['content'].strip():
+                            # DeepSeek documents occasional empty JSON-mode
+                            # content. Ask for the existing protocol once; never
+                            # substitute reasoning text or loosen application JSON validation.
+                            if (not format_attempt and cfg['json_mode'] and normal_stop
+                                    and isinstance(message,dict) and message.get('refusal') is None
+                                    and isinstance(message.get('content'),str) and not message['content'].strip()):
+                                self._format_retry_count.set(1)
+                                payload={**payload,'messages':original_messages+[
+                                    {'role':'system','content':_JSON_FORMAT_REMINDER}]}
+                                continue
+                            raise ModelError('模型未返回最终正文','empty_content')
+                        content=message['content'].strip()
+                        if len(content)>50000:
+                            raise ModelError('模型输出超过允许长度','output_too_long')
+                        reported=body.get('model')
+                        self.last_response_model=(reported if isinstance(reported,str)
+                            and re.fullmatch(r'[A-Za-z0-9._:/@+\-]{1,240}',reported)
+                            and not (cfg.get('api_key') and cfg['api_key'] in reported) else None)
+                        return content
         except (httpx.HTTPError,TimeoutError,ValueError,TypeError,KeyError) as exc:
             status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
             code='provider_timeout' if isinstance(exc,(TimeoutError,httpx.TimeoutException)) else 'provider_http_error' if isinstance(exc,httpx.HTTPError) else 'invalid_response'

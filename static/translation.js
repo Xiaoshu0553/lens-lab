@@ -337,7 +337,7 @@
       else if (info.study_mode === "pilot") { $("mode-banner").hidden = false; $("mode-banner").textContent = "预测试模式 · 对话将请求所配置的模型 API。使用候选研究材料，当前仅比较直接翻译与主动澄清。"; }
       else if (!info.ready) { $("mode-banner").hidden = false; $("mode-banner").classList.add("warning"); $("mode-banner").textContent = preview ? "正式实验材料尚未冻结。研究者仍可试跑，试跑记录不进入参与者统计。" : "正式实验材料尚未冻结，当前暂不开放新任务。请联系研究者。"; }
       else { $("mode-banner").hidden = false; $("mode-banner").textContent = "正式实验模式 · 当前材料已冻结，对话将请求所配置的模型 API。"; }
-      if (info.study_mode !== "demo") { $("mode-banner").hidden = false; $("mode-banner").textContent += (info.model_api_verified ? " 本进程已记录成功 API 调用。" : " 本进程尚未记录成功 API 调用；配置存在不等于连通成功。"); }
+      if (info.study_mode !== "demo") { $("mode-banner").hidden = false; $("mode-banner").textContent += (info.model_api_verified ? " 本进程已记录成功 API 调用。" : info.model_api_verified_at ? " 此前已连通模型 API；最近一次调用未成功，请稍后重试。" : " 本进程尚未记录成功 API 调用；配置存在不等于连通成功。"); }
       const resumeForm = saved.stage === "form" || (!saved.stage && !!saved.intake && questionItems().some(hasAnswer));
       $("global-status").textContent = ""; updateIntake();
       if (saved.sessionId) await recover();

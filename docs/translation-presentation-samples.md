@@ -29,6 +29,8 @@ python scripts/generate_translation_samples.py \
 
 中断后，用相同的 origin、count、seed、pace 和 manifest 重跑。可以调整 worker 数量。脚本重用 start/message 请求编号；已确认完成的请求不会重发、不会再次等待，成功会话不会被重新建立。正在生成的请求先同步。过期会话不会通过伪造时间或新建替身会话“修复”；批次会保留完成部分并报告需要处理的样本。
 
+`json-content-field-v2` 补丁明确要求模型将译文标记置于系统规定的 JSON `content` 字符串内，避免将“仅输出译文”误解为绕开 JSON 外壳。恢复旧批次时，已完成的旧 final 请求原样保留；尚未发送或服务端已记录失败、且无待生成请求的旧 final 轮次，可以改用稳定的 `message-N-json-format-retry` 新请求编号。原编号、原文与状态完整保留在 `format_retries`，不更改旧编号对应的内容。新请求先保存后发送，之后继续使用同一编号幂等重试；它不增加成功对话的计划轮数，也不影响已有 start 编号、已等待时长和服务器时间。
+
 只核验、不创建平台数据：
 
 ```sh

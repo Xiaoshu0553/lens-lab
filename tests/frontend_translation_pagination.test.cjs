@@ -113,5 +113,13 @@ test('invitation is never persisted when questionnaire stage and confirmations a
 });
 test('navigation buttons are explicit non-submit controls and shipped assets have a new cache version',()=>{
   for(const id of ['form-prev','form-next','start-task'])assert.match(html,new RegExp(`<button id="${id}" type="button"`));
-  assert.match(html,/translation\.js\?v=undergraduate-20261030/);assert.match(html,/translation\.css\?v=hitbox-20261030/);
+  assert.match(html,/translation\.js\?v=json-recovery-20261030/);assert.match(html,/translation\.css\?v=hitbox-20261030/);
+});
+
+
+test('a failed recent call does not erase the fact that the API previously connected',async()=>{
+  const h=harness({currentInfo:{...info,model_api_verified:false,model_api_verified_at:'2026-10-29T16:59:36+00:00'}});await h.init();
+  assert.match(h.element('mode-banner').textContent,/此前已连通模型 API/);
+  assert.match(h.element('mode-banner').textContent,/最近一次调用未成功/);
+  assert.doesNotMatch(h.element('mode-banner').textContent,/尚未记录成功/);
 });

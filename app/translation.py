@@ -130,7 +130,8 @@ def register_translation(app, settings, require_admin, optional_basic):
         return dict(dialogue_backend='rule_simulation' if settings.study_mode=='demo' else 'model_api',
                     evaluation_backend='disabled_demo' if settings.study_mode=='demo' else 'multi_model_api',
                     model_api_verified=status['model_api_verified'],
-                    model_api_verified_at=status['dialogue']['verified_at'],panel_ready=status['panel']['ready'],
+                    model_api_verified_at=status['dialogue']['verified_at'],
+                    model_api_last_error=status['dialogue'].get('last_error'),panel_ready=status['panel']['ready'],
                     model_count=len(status['judges']),
                     model_verifications=[dict(id=c['id'],model=c['model'],verified_at=c['verified_at']) for c in status['judges']])
     with connect(settings.database_path) as db:
@@ -379,7 +380,8 @@ def register_translation(app, settings, require_admin, optional_basic):
                 if current and current.get('pending',{} ) and current['pending'].get('attempt')==attempt:
                     current['pending'] = None
                     current['requests'][body.request_id]['status']='failed'
-                    current['events'].append(dict(type='model_error', code=exc.code if isinstance(exc,ModelError) else 'internal_provider_error',created_at=now_utc()))
+                    current['events'].append(dict(type='model_error', code=exc.code if isinstance(exc,ModelError) else 'internal_provider_error',
+                        json_format_retries=getattr(provider,'format_retry_count',0),created_at=now_utc()))
                     save(db,current)
             if isinstance(exc,asyncio.CancelledError):
                 raise
@@ -398,6 +400,7 @@ def register_translation(app, settings, require_admin, optional_basic):
             current['requests'][body.request_id]['status']='completed'
             current['events'].append(dict(type='reply',request_id=body.request_id,seconds=round(time.monotonic()-started,3),
                                           reported_model=getattr(provider,'last_response_model',None),
+                                          json_format_retries=getattr(provider,'format_retry_count',0),
                                           created_at=now_utc()))
             save(db,current)
             return view(current)

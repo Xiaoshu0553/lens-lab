@@ -52,7 +52,7 @@
     $("hypothesis-note").textContent = summary.hypothesis_note || "当前检验主动澄清收益是否随翻译能力不同而变化，结果未预设。针对性优化模块须在本阶段结果分析后另行设计。";
     $("admin-mode").hidden = false;
     $("admin-mode").textContent = summary.study_mode === "demo" ? "演示模式 · 不调用真实模型、不生成译文质量评分。表格中的空白表示没有可用评分，不以模拟分数填充研究结果。" : summary.study_mode === "pilot" ? "预测试模式 · 对话和多模型评审将请求各自配置的模型 API；配置存在不等于连通成功，须用实际调用验证。当前使用候选研究材料，仅比较两组。" : "正式实验模式 · 当前只比较直接翻译与主动澄清。对话和多模型评审请求各自配置的模型 API；只有当前冻结版本与配置的参与者记录进入统计。";
-    if (summary.study_mode !== "demo") $("admin-mode").textContent += summary.model_api_verified ? " 本进程已记录成功 API 调用" + (summary.model_api_verified_at ? "（" + time(summary.model_api_verified_at) + "）" : "") + "。" : " 本进程尚未记录成功 API 调用。";
+    if (summary.study_mode !== "demo") $("admin-mode").textContent += summary.model_api_verified ? " 本进程已记录成功 API 调用" + (summary.model_api_verified_at ? "（" + time(summary.model_api_verified_at) + "）" : "") + "。" : summary.model_api_verified_at ? " 此前已连通模型 API；最近一次调用未成功，请稍后重试。" : " 本进程尚未记录成功 API 调用。";
     if (summary.study_mode !== "demo") $("admin-mode").textContent += summary.panel_ready ? ` 评审团配置完整（${summary.model_count || 0}个不同模型）；各模型连通状态见“模型与 API”。` : " 评审团尚未配置完整，不能生成综合质量分。请打开“模型与 API”配置不同评审模型。";
   }
   function filteredRecords() {

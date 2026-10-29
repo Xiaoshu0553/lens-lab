@@ -315,3 +315,129 @@ def test_full_http_protocol_submits_the_exact_final_reply_and_resume_makes_no_ne
     generator.run_sample(platform, manifest, plan, lambda: saved.append(deepcopy(plan)))
     assert platform.writes == previous_writes
     assert saved[-1]["status"] == "completed"
+
+
+def test_final_prompt_keeps_markers_inside_the_required_json_content_field():
+    plan = generator.make_plans(24, 9)[0]
+    view = {"task": {"context_cards": []}, "messages": [{"role": "assistant", "action": "answer", "content": "草稿"}]}
+    content, _ = generator.make_message(plan, view, 2, final=True)
+    assert "JSON对象" in content and "content字段" in content and "kind字段填answer" in content
+    assert '"content": "【最终译文】' in content and '"kind": "answer"' in content
+    assert "不是要求在JSON对象外输出文字" in content
+    assert "只输出【最终译文】" not in content
+
+
+def test_failed_legacy_final_gets_a_new_stable_id_without_mutating_the_failed_server_request():
+    from copy import deepcopy
+    manifest = {"seed": 42}
+    plan = {"sample_id": "P001", "index": 1, "session_id": "session"}
+    old_id = generator.stable_id(42, 1, "message-2")
+    old_content = "原背景：罗温是一个人。只输出【最终译文】完整译文【译文结束】。"
+    turn = {"request_id": old_id, "content": old_content, "final_requested": True,
+            "status": "planned", "card_ids": ["characters"], "pace_waited_seconds": 80}
+    old_server_request = {"content": old_content, "status": "failed"}
+    requests = {old_id: deepcopy(old_server_request)}
+    view = {"id": "session", "pending_reply": False, "completed_request_ids": [], "remaining_seconds": 1200}
+    class RecoveryFixture(generator.Platform):
+        def __init__(self):
+            self.pending_timeout = 1
+            self.poll_seconds = .1
+            self.sent = []
+        def session(self, _):
+            return deepcopy(view)
+        def record(self, _):
+            return {"requests": deepcopy(requests), "pending": None}
+        def request(self, method, path, payload=None, *, admin=False):
+            self.sent.append(deepcopy(payload))
+            # The actual backend rejects changing content attached to an old ID.
+            if payload["request_id"] in requests:
+                assert payload["content"] == requests[payload["request_id"]]["content"]
+            requests[payload["request_id"]] = {"content": payload["content"], "status": "completed"}
+            view["completed_request_ids"].append(payload["request_id"])
+            return deepcopy(view)
+    platform = RecoveryFixture()
+    saved = []
+    generator.repair_final_format(platform, manifest, plan, turn, 2, lambda: saved.append(deepcopy(turn)))
+    new_id = generator.stable_id(42, 1, "message-2-json-format-retry")
+    assert turn["request_id"] == new_id != old_id
+    assert turn["content"].startswith(old_content + "\n")
+    assert turn["format_protocol"] == generator.FORMAT_PROTOCOL and turn["replaces"] == old_id
+    assert turn["pace_waited_seconds"] == 80 and turn["card_ids"] == ["characters"]
+    assert turn["format_retries"][0]["request_id"] == old_id
+    assert turn["format_retries"][0]["content"] == old_content
+    assert turn["format_retries"][0]["server_request_status"] == "failed"
+    assert saved and saved[0]["request_id"] == new_id
+    platform.complete_round("session", turn)
+    assert platform.sent == [{"content": turn["content"], "request_id": new_id}]
+    assert requests[old_id] == old_server_request
+    snapshot = deepcopy(turn)
+    generator.repair_final_format(platform, manifest, plan, turn, 2, lambda: pytest.fail("format repair must be idempotent"))
+    assert turn == snapshot
+
+
+@pytest.mark.parametrize("server_status", ["completed", "failed"])
+def test_completed_legacy_final_is_never_replaced_even_if_manifest_was_not_updated(server_status):
+    from copy import deepcopy
+    turn = {"request_id": "completed-old-id", "content": "已完成原消息", "final_requested": True, "status": "planned"}
+    snapshot = deepcopy(turn)
+    class CompletedFixture:
+        def session(self, _):
+            return {"completed_request_ids": [turn["request_id"]]}
+        def wait_for_pending(self, view):
+            return view
+        def record(self, _):
+            return {"requests": {turn["request_id"]: {"status": server_status}}}
+    generator.repair_final_format(CompletedFixture(), {"seed": 1}, {"session_id": "session", "index": 1}, turn, 2,
+                                  lambda: pytest.fail("a completed original request must remain unchanged"))
+    assert turn == snapshot
+
+
+def test_pending_legacy_final_is_synced_to_completion_before_any_replacement():
+    from copy import deepcopy
+    turn = {"request_id": "accepted-original", "content": "正在生成的原消息", "final_requested": True, "status": "planned"}
+    snapshot = deepcopy(turn)
+    calls = []
+    class PendingFixture:
+        def session(self, _):
+            calls.append("sync")
+            return {"pending_reply": True}
+        def wait_for_pending(self, view):
+            assert view["pending_reply"] is True
+            calls.append("wait")
+            return {"pending_reply": False, "completed_request_ids": [turn["request_id"]]}
+        def record(self, _):
+            pytest.fail("a synchronized completed request needs no format replacement")
+    generator.repair_final_format(PendingFixture(), {"seed": 1}, {"session_id": "session", "index": 1}, turn, 2,
+                                  lambda: pytest.fail("pending original completed without replacement"))
+    assert calls == ["sync", "wait"] and turn == snapshot
+
+
+def test_unattempted_legacy_final_preserves_original_plan_and_marks_replacement():
+    turn = {"request_id": "never-sent-original", "content": "原计划尚未发送", "final_requested": True, "status": "planned"}
+    class UnsentFixture:
+        def session(self, _):
+            return {"pending_reply": False, "completed_request_ids": []}
+        def wait_for_pending(self, view):
+            return view
+        def record(self, _):
+            return {"requests": {}, "pending": None}
+    generator.repair_final_format(UnsentFixture(), {"seed": 1}, {"session_id": "session", "index": 1}, turn, 2, lambda: None)
+    assert turn["request_id"] == generator.stable_id(1, 1, "message-2-json-format-retry")
+    assert turn["replaces"] == "never-sent-original"
+    assert turn["format_retries"][0]["server_request_status"] == "not_sent"
+    assert turn["format_retries"][0]["content"] == "原计划尚未发送"
+
+
+def test_legacy_request_without_conclusive_failure_is_not_rewritten():
+    turn = {"request_id": "unknown-pending", "content": "原文", "final_requested": True, "status": "planned"}
+    class UnresolvedFixture:
+        def session(self, _):
+            return {"pending_reply": False, "completed_request_ids": []}
+        def wait_for_pending(self, view):
+            return view
+        def record(self, _):
+            return {"requests": {turn["request_id"]: {"status": "pending"}}, "pending": None}
+    with pytest.raises(generator.SampleError):
+        generator.repair_final_format(UnresolvedFixture(), {"seed": 1}, {"session_id": "session", "index": 1}, turn, 2,
+                                      lambda: pytest.fail("unconfirmed request must not be changed"))
+    assert turn["request_id"] == "unknown-pending" and turn["content"] == "原文"

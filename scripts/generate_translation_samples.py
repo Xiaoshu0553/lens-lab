@@ -37,6 +37,7 @@ from app.config import load_dotenv
 from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK_VERSION, score_form
 
 GENERATOR_VERSION = "translation-http-presentation-v1"
+FORMAT_PROTOCOL = "json-content-field-v2"
 METHOD = {
     "purpose": "demonstration",
     "questionnaires": "Seeded, probability-sampled simulated answers, conditional on predeclared ability strata.",
@@ -48,6 +49,14 @@ METHOD = {
 }
 FINAL_BEGIN = "【最终译文】"
 FINAL_END = "【译文结束】"
+FINAL_JSON_INSTRUCTION = (
+    "请继续遵守系统要求，只输出一个合法JSON对象，kind字段填answer；"
+    "content字段的字符串内容只包含下列译文起止标记和完整译文，不包含说明、标题或译注。"
+    "这里的起止标记位于JSON的content字符串内部，不是要求在JSON对象外输出文字。"
+    "JSON格式示例（将占位文字替换为整段完整中文译文）："
+    + json.dumps({"content": FINAL_BEGIN + "此处替换为整段完整中文译文" + FINAL_END,
+                  "kind": "answer"}, ensure_ascii=False)
+)
 _LOCAL_HOSTS = {"localhost", "0.0.0.0", "127.0.0.1", "::1", "host.docker.internal"}
 _CARD_CUES = {
     "characters": ("they", "them", "their", "单数", "几个人", "非二元", "性别", "人物指代"),
@@ -374,7 +383,7 @@ def make_message(plan: dict, view: dict, round_number: int, *, final: bool) -> t
         pieces.append(
             "我目前无法再补充其他信息，请根据已经确认的内容，直接给出整段从头到尾的完整中文译文。"
             "未确定之处保留原文的含混，不再提问，不添加情节，也不要将背景解释扩写进正文。"
-            f"只输出{FINAL_BEGIN}完整译文{FINAL_END}，标记之间只放译文，不放说明、标题或译注。")
+            + FINAL_JSON_INSTRUCTION)
     return "\n".join(pieces), [card["id"] for card in selected]
 
 
@@ -443,6 +452,42 @@ def pace_round(platform: Platform, plan: dict, turn: dict, persist) -> None:
         persist()
 
 
+def repair_final_format(platform: Platform, manifest: dict, plan: dict, turn: dict,
+                        number: int, persist) -> None:
+    """Preserve legacy requests; replace only failed/unsent final requests.
+
+    The original ID/content pair remains in the server audit and a full local
+    history snapshot. Completed or accepted pending requests must resolve before
+    deciding whether a replacement is safe. A replacement itself never changes
+    its ID or content on subsequent retries.
+    """
+    if not turn.get("final_requested") or turn.get("format_protocol") == FORMAT_PROTOCOL:
+        return
+    previous_id = turn["request_id"]
+    current_view = platform.wait_for_pending(platform.session(plan["session_id"]))
+    if previous_id in current_view.get("completed_request_ids", []):
+        return
+    current_record = platform.record(plan["session_id"])
+    previous_request = current_record.get("requests", {}).get(previous_id)
+    previous_status = previous_request.get("status") if previous_request else None
+    if previous_status == "completed":
+        return
+    if current_record.get("pending") or previous_status not in {None, "failed"}:
+        raise SampleError("A legacy final request has not conclusively failed; keep its original ID and sync first")
+    replacement_id = stable_id(manifest["seed"], plan["index"], f"message-{number}-json-format-retry")
+    if replacement_id == previous_id:
+        raise SampleError("The final format-retry request is missing its protocol metadata")
+    previous_snapshot = deepcopy({key: value for key, value in turn.items() if key != "format_retries"})
+    previous_snapshot.update(server_request_status=previous_status or "not_sent",
+                             replaced_at=utc_now(), reason="explicit-json-content-field-format")
+    history = turn.setdefault("format_retries", [])
+    history.append(previous_snapshot)
+    turn.update(request_id=replacement_id, content=turn["content"] + "\n" + FINAL_JSON_INSTRUCTION,
+                status="planned", format_protocol=FORMAT_PROTOCOL, replaces=previous_id)
+    turn.pop("reply", None)
+    persist()  # The replacement ID/content pair must reach disk before a POST.
+
+
 def run_sample(platform: Platform, manifest: dict, plan: dict, persist) -> None:
     if not plan.get("session_id"):
         # The start request ID is on disk before the first network mutation.
@@ -471,9 +516,12 @@ def run_sample(platform: Platform, manifest: dict, plan: dict, persist) -> None:
             content, cards = make_message(plan, view, number, final=final)
             turn = {"request_id": stable_id(manifest["seed"], plan["index"], f"message-{number}"),
                     "content": content, "final_requested": final, "card_ids": cards, "status": "planned"}
+            if final:
+                turn["format_protocol"] = FORMAT_PROTOCOL
             plan["rounds"].append(turn)
             plan["provided_card_ids"].extend(cards)
             persist()
+        repair_final_format(platform, manifest, plan, turn, number, persist)
         pace_round(platform, plan, turn, persist)
         view = platform.complete_round(plan["session_id"], turn)
         reply = _round_reply(view, turn, offset)
@@ -602,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise SampleError("Verification requires an existing completed manifest")
             manifest = open_manifest(path, base_url, args.count, args.seed, args.pace_seconds)
             manifest["preflight"] = preflight
+            manifest["format_protocol"] = FORMAT_PROTOCOL
             persist = lambda: save_manifest(path, manifest)
             if not args.verify_only:
                 execute_batch(manifest, path, lambda: Platform(base_url, password, access_code,
