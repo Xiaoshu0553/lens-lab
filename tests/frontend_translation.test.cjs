@@ -44,7 +44,7 @@ function harness({admin = false, preview = false, stored = {}, fetch = () => { t
   return {hooks: context.hooks, element, storage, timers, requests};
 }
 function intake(h) {
-  h.element('age-band').value = '18-20'; h.element('education-stage').value = 'bachelor'; h.element('translation-experience').value = '2'; h.element('consent').checked = true; h.element('university-confirmed').checked = true;
+  h.element('age-band').value = '19'; h.element('education-stage').value = 'year-2'; h.element('translation-experience').value = '2'; h.element('consent').checked = true; h.element('university-confirmed').checked = true;
 }
 async function fireTimer(h, delay) {
   const pair = [...h.timers.entries()].find(([, timer]) => timer.delay === delay); assert.ok(pair, `Expected ${delay}ms timer`); h.timers.delete(pair[0]); await pair[1].callback();
@@ -55,7 +55,25 @@ test('start persists a stable request ID without persisting the invitation code'
   const h = harness({fetch: () => response(session())}); intake(h); h.element('access-code').value = 'PRIVATE-INVITE-123';
   h.hooks.prime({answers: {q1: 0}, selfAnswers: {}}); await h.hooks.start();
   const submitted = JSON.parse(h.requests[0].options.body); assert.equal(submitted.access_code, 'PRIVATE-INVITE-123');
+  assert.equal(submitted.age_band, '19'); assert.equal(submitted.education_stage, 'bachelor'); assert.equal(submitted.undergraduate_year, 'year-2');
   const stored = [...h.storage.values.values()].join(''); assert.ok(!stored.includes('PRIVATE-INVITE-123')); assert.ok(stored.includes(submitted.request_id));
+});
+
+test('participant intake rejects broad legacy age bands and missing undergraduate year', () => {
+  const h = harness(); intake(h); assert.equal(h.hooks.intakeReady(), true);
+  h.element('age-band').value = '18-20'; assert.equal(h.hooks.intakeReady(), false);
+  h.element('age-band').value = '19'; h.element('education-stage').value = 'bachelor'; assert.equal(h.hooks.intakeReady(), false);
+  h.element('education-stage').value = 'graduate'; assert.equal(h.hooks.intakeReady(), false);
+});
+
+test('native dropdown change activates intake and saves undergraduate background', async () => {
+  const h = harness(); intake(h);
+  await h.element('education-stage').emit('change');
+  assert.equal(h.element('begin-form').disabled, false);
+  const state = JSON.parse(h.storage.getItem('lens-translation-v1:participant:'));
+  assert.equal(state.intake.undergraduate_year, 'year-2');
+  assert.equal(state.intake.education_stage, 'bachelor');
+  assert.equal(state.intake.eligibility_version, 'cumt-undergraduate-v1');
 });
 
 test('authorized preview can begin before live freezing and without an invitation', () => {
@@ -111,6 +129,18 @@ test('expert detail reads weighted totals from the aggregate result', () => {
 test('pilot readiness is not displayed as frozen material approval', async () => {
   const h = harness({admin: true, fetch: () => response({ready: true, frozen: false, material_status: '候选材料', form: {items: [], self_items: []}, task: {}, rubric: [], experts: []})}); h.hooks.prime({summary: {study_mode: 'pilot'}}); await h.hooks.showMaterials();
   assert.match(h.element('materials-status').textContent, /未冻结/); assert.equal(h.element('materials-freeze').hidden, true);
+});
+
+test('materials panel displays all configured models from the materials API response', async () => {
+  const models = Array.from({length: 5}, (_, index) => ({id: `judge-${index + 1}`, label: `独立评审 ${index + 1}`, model: `configured-model-${index + 1}`, weight: index + 1}));
+  const h = harness({admin: true, fetch: url => {
+    assert.equal(url, '/api/admin/translation/materials');
+    return response({ready: true, frozen: false, material_status: '候选材料', form: {items: [], self_items: []}, task: {}, rubric: [], models});
+  }});
+  h.hooks.prime({summary: {study_mode: 'pilot'}}); await h.hooks.showMaterials();
+  const text = allText(h.element('materials-content'));
+  for (const model of models) { assert.ok(text.includes(model.label)); assert.ok(text.includes(model.model)); }
+  assert.equal(h.element('materials-status').textContent.includes('失败'), false);
 });
 
 

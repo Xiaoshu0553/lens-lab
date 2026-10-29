@@ -5,6 +5,7 @@ import io
 import json
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -16,7 +17,7 @@ from translation_multi_model_helpers import configure_panel, panel_models
 def payload(**changes):
     value = {
         'consent': True, 'university_confirmed': True,
-        'age_band': '21-23', 'education_stage': 'bachelor',
+        'age_band': '21', 'education_stage': 'bachelor', 'undergraduate_year': 'year-3',
         'translation_experience': 3, 'pretest_version': FORM_VERSION,
         'answers': {item['id']: item['correct'] for item in FORM_ITEMS},
         'self_answers': {item['id']: 2 for item in SELF_ITEMS},
@@ -43,6 +44,36 @@ def dialogue(client, sid):
                                  'request_id': str(uuid.uuid4())})
     assert response.status_code == 200, response.text
     return response.json()
+
+
+@pytest.mark.parametrize('changes', [
+    {'education_stage': 'college'}, {'education_stage': 'graduate'},
+    {'undergraduate_year': None}, {'undergraduate_year': 'bachelor'},
+    {'age_band': '17'}, {'age_band': '18-20'}, {'age_band': '26-plus'},
+    {'university_confirmed': False},
+])
+def test_translation_rejects_intake_outside_current_undergraduate_scope(tmp_path, changes):
+    client = TestClient(create_app(settings(tmp_path)))
+    response = client.post('/api/translation/start', json=payload(**changes))
+    assert response.status_code == 422
+    assert admin_records(client) == []
+
+
+def test_translation_undergraduate_background_is_retained_in_auditable_exports(tmp_path):
+    client = TestClient(create_app(settings(tmp_path)))
+    scope = client.get('/api/translation/info').json()['participant_scope']
+    assert scope['education_stage'] == 'bachelor' and scope['minimum_age'] == 18
+    session = start(client, age_band='23-plus', undergraduate_year='year-5-plus')
+    row = client.get(f'/api/admin/translation/records/{session["id"]}', headers=auth()).json()
+    assert row['education_stage'] == 'bachelor'
+    assert row['age_band'] == '23-plus' and row['undergraduate_year'] == 'year-5-plus'
+    assert row['eligibility_version'] == scope['version']
+    assert row['material_snapshot']['eligibility'] == scope
+    response = client.get('/api/admin/translation/export?format=csv', headers=auth())
+    exported = list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
+    assert exported[0]['age_band'] == '23-plus'
+    assert exported[0]['undergraduate_year'] == 'year-5-plus'
+    assert exported[0]['eligibility_version'] == scope['version']
 
 
 def test_translation_form_and_session_hide_answers_condition_and_quality_keys(tmp_path):

@@ -13,6 +13,9 @@
   let displayedMessageKey = "", displayedMaterialKey = "", countdownBase = null, starting = false, pollTimer = null, pollCount = 0;
   let movingPage = false, validationAttempted = false;
   const pageSize = 5;
+  const eligibilityVersion = "cumt-undergraduate-v1";
+  const ageBands = new Set(["18", "19", "20", "21", "22", "23-plus"]);
+  const undergraduateYears = new Set(["year-1", "year-2", "year-3", "year-4", "year-5-plus"]);
   const uuid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const writeSaved = () => {
     saved = {...saved, answers, selfAnswers, messageRequest, startRequest};
@@ -45,11 +48,11 @@
     writeSaved();
   }
   function intakeReady() {
-    return Boolean(["age-band", "education-stage", "translation-experience"].every(id => $(id).value) && $("university-confirmed").checked && $("consent").checked && (preview || !info?.access_code_required || $("access-code").value.trim()) && !!form && (preview || info?.study_mode !== "live" || info.ready));
+    return Boolean(ageBands.has($("age-band").value) && undergraduateYears.has($("education-stage").value) && ["1", "2", "3", "4", "5"].includes($("translation-experience").value) && $("university-confirmed").checked && $("consent").checked && (preview || !info?.access_code_required || $("access-code").value.trim()) && !!form && (preview || info?.study_mode !== "live" || info.ready));
   }
   function updateIntake() {
     $("begin-form").disabled = !intakeReady();
-    saved.intake = {age_band: $("age-band").value, education_stage: $("education-stage").value, translation_experience: $("translation-experience").value, university_confirmed: $("university-confirmed").checked, consent: $("consent").checked};
+    saved.intake = {age_band: $("age-band").value, education_stage: "bachelor", undergraduate_year: $("education-stage").value, eligibility_version: eligibilityVersion, translation_experience: $("translation-experience").value, university_confirmed: $("university-confirmed").checked, consent: $("consent").checked};
     writeSaved();
   }
   function questionItems() {
@@ -158,7 +161,7 @@
       $("intake-panel").scrollIntoView({block: "start"}); return;
     }
     starting = true; $("start-task").disabled = true; $("form-error").textContent = "";
-    const payload = {consent: true, university_confirmed: true, age_band: $("age-band").value, education_stage: $("education-stage").value, translation_experience: Number($("translation-experience").value), pretest_version: form.version, answers, self_answers: selfAnswers, access_code: $("access-code").value, researcher_preview: preview};
+    const payload = {consent: true, university_confirmed: true, age_band: $("age-band").value, education_stage: "bachelor", undergraduate_year: $("education-stage").value, translation_experience: Number($("translation-experience").value), pretest_version: form.version, answers, self_answers: selfAnswers, access_code: $("access-code").value, researcher_preview: preview};
     if (preview && $("preview-condition").value) payload.preview_condition = $("preview-condition").value;
     const signature = JSON.stringify({...payload, access_code: undefined});
     if (!startRequest || startRequest.signature !== signature) startRequest = {id: uuid(), signature};
@@ -301,7 +304,10 @@
   }
   function resetLocal() { clearTimeout(draftTimer); clearTimeout(pollTimer); pollTimer = null; pollCount = 0; saved = {}; view = null; answers = {}; selfAnswers = {}; page = 0; messageRequest = null; startRequest = null; displayedMessageKey = ""; writeSaved(); $("draft-input").value = ""; $("message-input").value = ""; $("consent").checked = false; $("university-confirmed").checked = false; updateIntake(); showPanel("intake-panel"); }
   $("begin-form").addEventListener("click", () => { if (intakeReady()) { updateIntake(); restoreFormPage(); $("global-status").textContent = ""; $("form-heading").focus(); } });
-  for (const id of ["age-band", "education-stage", "translation-experience", "university-confirmed", "consent", "access-code"]) $(id).addEventListener("input", updateIntake);
+  for (const id of ["age-band", "education-stage", "translation-experience", "university-confirmed", "consent", "access-code"]) {
+    $(id).addEventListener("input", updateIntake);
+    $(id).addEventListener("change", updateIntake);
+  }
   $("form-prev").addEventListener("click", () => movePage(-1));
   $("form-next").addEventListener("click", () => movePage(1));
   $("form-return-intake").addEventListener("click", () => { syncVisibleAnswers(); showPanel("intake-panel"); $("intake-panel").scrollIntoView({block: "start"}); });
@@ -317,7 +323,15 @@
       [info, form] = await Promise.all([api("/api/translation/info"), api("/api/translation/form")]);
       if (saved.formVersion && saved.formVersion !== form.version) { answers = {}; selfAnswers = {}; startRequest = null; delete saved.formPage; saved.stage = "intake"; }
       saved.formVersion = form.version; writeSaved();
-      if (saved.intake) { $("age-band").value = saved.intake.age_band || ""; $("education-stage").value = saved.intake.education_stage || ""; $("translation-experience").value = saved.intake.translation_experience || ""; $("university-confirmed").checked = saved.intake.university_confirmed === true; $("consent").checked = saved.intake.consent === true; }
+      if (saved.intake) {
+        $("age-band").value = ageBands.has(saved.intake.age_band) ? saved.intake.age_band : "";
+        $("education-stage").value = saved.intake.education_stage === "bachelor" && undergraduateYears.has(saved.intake.undergraduate_year) ? saved.intake.undergraduate_year : "";
+        $("translation-experience").value = saved.intake.translation_experience || "";
+        // Earlier intake covered all student stages. Do not infer an exact age,
+        // undergraduate year or eligibility confirmation from that broader scope.
+        $("university-confirmed").checked = saved.intake.eligibility_version === eligibilityVersion && saved.intake.education_stage === "bachelor" && saved.intake.university_confirmed === true;
+        $("consent").checked = saved.intake.consent === true;
+      }
       $("preview-controls").hidden = !preview; $("access-code-label").hidden = !info.access_code_required || preview;
       if (info.study_mode === "demo") { $("mode-banner").hidden = false; $("mode-banner").textContent = "演示模式 · AI 对话由内置规则模拟，不调用真实模型，也不生成译文质量评分。本次数据不能作为实证结果。"; }
       else if (info.study_mode === "pilot") { $("mode-banner").hidden = false; $("mode-banner").textContent = "预测试模式 · 对话将请求所配置的模型 API。使用候选研究材料，当前仅比较直接翻译与主动澄清。"; }

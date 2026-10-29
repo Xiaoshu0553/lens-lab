@@ -24,7 +24,7 @@ SUBMISSION = "玛拉来到钟楼宅时，罗温正在门边等着，掌心握着
 
 
 def _payload(**changes):
-    value = dict(consent=True, university_confirmed=True, age_band="21-23", education_stage="bachelor",
+    value = dict(consent=True, university_confirmed=True, age_band="21", education_stage="bachelor", undergraduate_year="year-3",
                  translation_experience=3, pretest_version=FORM_VERSION,
                  answers={item["id"]: item["correct"] for item in FORM_ITEMS},
                  self_answers={item["id"]: 2 for item in SELF_ITEMS}, request_id=str(uuid.uuid4()))

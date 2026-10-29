@@ -53,6 +53,7 @@ class Settings:
     preview_api_prefix: str = ""
     researcher_preview_only: bool = False
     translation_models_path: Path | None = None
+    translation_showcase_mode: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,6 +65,9 @@ class Settings:
         if showcase_flag not in {"0", "1"}:
             raise ValueError("SHOWCASE_MODE 只能是 0 或 1")
         showcase_mode = showcase_flag == "1"
+        translation_showcase_flag = os.getenv("TRANSLATION_SHOWCASE_MODE", "0")
+        if translation_showcase_flag not in {"0", "1"}:
+            raise ValueError("TRANSLATION_SHOWCASE_MODE 只能是 0 或 1")
         preview_only_flag = os.getenv("RESEARCHER_PREVIEW_ONLY", "0")
         if preview_only_flag not in {"0", "1"}:
             raise ValueError("RESEARCHER_PREVIEW_ONLY 只能是 0 或 1")
@@ -136,4 +140,5 @@ class Settings:
             preview_api_prefix=preview_prefix,
             researcher_preview_only=preview_only_flag == "1",
             translation_models_path=Path(os.getenv("TRANSLATION_MODELS_PATH", str(ROOT / ".translation-models.json"))),
+            translation_showcase_mode=translation_showcase_flag == "1",
         )

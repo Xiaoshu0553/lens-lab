@@ -49,7 +49,7 @@ function harness({stored = {}, currentInfo = info} = {}) {
     info = ${JSON.stringify(currentInfo)}; form = ${JSON.stringify(form)}; globalThis.paginationHooks = {init,start};`);
   vm.runInContext(source, context);
   const element = id => document.getElementById(id);
-  for (const [id,value] of [['age-band','18-20'],['education-stage','bachelor'],['translation-experience','3']]) element(id).value=value;
+  for (const [id,value] of [['age-band','19'],['education-stage','year-2'],['translation-experience','3']]) element(id).value=value;
   element('university-confirmed').checked=true; element('consent').checked=true;
   return {element,storage,requests,windowEvents,init:context.paginationHooks.init,start:context.paginationHooks.start};
 }
@@ -93,6 +93,13 @@ test('legacy saved answers without page metadata resume at the first unanswered 
   const state={formVersion:form.version,intake:{age_band:'18-20',education_stage:'bachelor',translation_experience:'3'},answers:Object.fromEntries(Array.from({length:10},(_,i)=>['q'+(i+1),0])),selfAnswers:{}};
   const h=harness({stored:{[storageKey]:JSON.stringify(state)}});await h.init();assert.equal(h.element('form-panel').hidden,false);assert.equal(h.element('form-page').textContent,'第 3 / 5 页');assert.equal(h.element('form-progress').textContent,'10 / 24 已作答');
   assert.equal(h.element('consent').checked,false);assert.equal(h.element('university-confirmed').checked,false);assert.equal(h.requests.length,2);
+  assert.equal(h.element('age-band').value,'');assert.equal(h.element('education-stage').value,'');
+});
+test('current undergraduate intake and its confirmations restore with questionnaire answers',async()=>{
+  const state={stage:'form',formPage:1,formVersion:form.version,intake:{age_band:'20',education_stage:'bachelor',undergraduate_year:'year-3',eligibility_version:'cumt-undergraduate-v1',translation_experience:'3',consent:true,university_confirmed:true},answers:{q1:0,q2:0,q3:0,q4:0,q5:0},selfAnswers:{}};
+  const h=harness({stored:{[storageKey]:JSON.stringify(state)}});await h.init();
+  assert.equal(h.element('form-page').textContent,'第 2 / 5 页');assert.equal(h.element('form-progress').textContent,'5 / 24 已作答');
+  assert.equal(h.element('age-band').value,'20');assert.equal(h.element('education-stage').value,'year-3');assert.equal(h.element('university-confirmed').checked,true);assert.equal(h.element('consent').checked,true);
 });
 test('final-page review locates an earlier missing answer by stable question id',async()=>{
   const answers=Object.fromEntries(Array.from({length:18},(_,i)=>['q'+(i+1),0]));delete answers.q7;
@@ -106,5 +113,5 @@ test('invitation is never persisted when questionnaire stage and confirmations a
 });
 test('navigation buttons are explicit non-submit controls and shipped assets have a new cache version',()=>{
   for(const id of ['form-prev','form-next','start-task'])assert.match(html,new RegExp(`<button id="${id}" type="button"`));
-  assert.match(html,/translation\.js\?v=pagination-20261030/);assert.match(html,/translation\.css\?v=pagination-20261030/);
+  assert.match(html,/translation\.js\?v=undergraduate-20261030/);assert.match(html,/translation\.css\?v=hitbox-20261030/);
 });

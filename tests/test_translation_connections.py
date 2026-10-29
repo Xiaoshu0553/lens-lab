@@ -173,7 +173,7 @@ def test_no_credentials_in_participant_admin_material_record_or_export_responses
     judges=panel_models()
     for model in judges:model["api_key"]=SECRET
     assert client.put("/api/admin/translation/models",json={"judges":judges},headers=auth()).status_code==200
-    payload=dict(consent=True,university_confirmed=True,age_band="21-23",education_stage="bachelor",translation_experience=3,
+    payload=dict(consent=True,university_confirmed=True,age_band="21",education_stage="bachelor",undergraduate_year="year-3",translation_experience=3,
                  pretest_version=FORM_VERSION,answers={item["id"]:item["correct"] for item in FORM_ITEMS},
                  self_answers={item["id"]:2 for item in SELF_ITEMS},request_id=str(uuid.uuid4()))
     started=client.post("/api/translation/start",json=payload)
@@ -206,7 +206,7 @@ def test_inflight_evaluation_keeps_old_provider_generation_when_configuration_is
         async def complete(self,messages,*,temperature=None):
             return json.dumps({"kind":"answer","content":"玛拉来到钟楼宅时，罗温在门边等候，手里握着银狐徽记。"},ensure_ascii=False)
     app.state.translation_provider=Dialogue()
-    payload=dict(consent=True,university_confirmed=True,age_band="21-23",education_stage="bachelor",translation_experience=3,
+    payload=dict(consent=True,university_confirmed=True,age_band="21",education_stage="bachelor",undergraduate_year="year-3",translation_experience=3,
                  pretest_version=FORM_VERSION,answers={item["id"]:item["correct"] for item in FORM_ITEMS},
                  self_answers={item["id"]:2 for item in SELF_ITEMS},request_id=str(uuid.uuid4()),
                  researcher_preview=True,preview_condition="S")

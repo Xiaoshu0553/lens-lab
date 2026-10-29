@@ -145,7 +145,7 @@
       for (const [index, item] of (materials.form?.items || materials.form_items || []).entries()) { const field = el("div", null, "materials-item"); field.append(el("strong", `${index + 1}. ${item.stem}`)); const options = el("ol"); for (const [value, text] of (item.options || []).entries()) options.append(el("li", typeof text === "string" ? text : text.text, item.correct === value ? "correct" : undefined)); field.append(options); if (item.rationale) field.append(el("p", "依据：" + item.rationale, "muted")); questions.append(field); } box.append(questions);
       const self = el("details", null, "materials-item"); self.append(el("summary", "实践自评（不计入客观能力分组）")); for (const item of materials.form?.self_items || materials.self_items || []) { self.append(el("p", item.stem)); const options = el("ol"); for (const option of item.options || []) options.append(el("li", option)); self.append(options); } box.append(self);
       box.append(table(["评分维度", "权重", "说明"], (materials.rubric || []).map(item => [item.label, `${item.weight}%`, item.description || item.criteria || "按统一量规评分"])));
-      box.append(table(["评审模型", "模型 ID", "预设权重"], (materials.judges || materials.panel?.judges || []).map(item => [item.label || item.id, item.model, number(item.weight, 3)])));
+      box.append(table(["评审模型", "模型 ID", "预设权重"], (materials.models || materials.judges || materials.panel?.judges || []).map(item => [item.label || item.id, item.model, number(item.weight, 3)])));
       box.append(el("p", "每个模型使用相同的完整五维评分要求，互不读取其他模型评分。评审模型与权重在研究配置中冻结。", "admin-section-note"));
       $("materials-freeze").hidden = materials.frozen || summary?.study_mode !== "live";
     } catch (error) { $("materials-status").textContent = errorText(error); }
