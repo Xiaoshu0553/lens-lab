@@ -1,12 +1,11 @@
 import json
-import hashlib
 from copy import deepcopy
 
 import pytest
 
 from app.model import ModelError
 from app.translation_materials import PROMPT_VERSION, TASK
-from app.translation_model import (ACTIVE_CLARIFICATION_POLICY, BASELINE_CONDITIONS,
+from app.translation_model import (ACTIVE_CLARIFICATION_POLICY, RESPONSE_SCOPE_POLICY, BASELINE_CONDITIONS,
     audit_prompt, build_dialogue_messages, demo_reply, dialogue_message_protocol,
     dialogue_prompt, parse_plan, parse_reply)
 
@@ -135,37 +134,42 @@ def test_conditions_add_clarification_then_accessible_scaffolding_without_abilit
 
 def test_active_priority_policy_follows_json_contract_and_does_not_enable_optimizer():
     active = dialogue_prompt(TASK, "A")
-    assert active.endswith("\n" + ACTIVE_CLARIFICATION_POLICY)
-    assert active.index('仅输出JSON对象：{"content"') < active.index(ACTIVE_CLARIFICATION_POLICY)
+    assert active.endswith("\n" + RESPONSE_SCOPE_POLICY)
+    assert active.index('仅输出JSON对象：{"kind"') < active.index(ACTIVE_CLARIFICATION_POLICY)
+    assert active.index(ACTIVE_CLARIFICATION_POLICY) < active.index(RESPONSE_SCOPE_POLICY)
     assert ACTIVE_CLARIFICATION_POLICY not in dialogue_prompt(TASK, "S")
     assert ACTIVE_CLARIFICATION_POLICY not in dialogue_prompt(TASK, "O")
     assert tuple(BASELINE_CONDITIONS) == ("S", "A")
     assert "优化模块" not in active and "两三个候选解释" not in active
-    assert PROMPT_VERSION == "translation-dialogue-v3"
+    assert PROMPT_VERSION == "translation-dialogue-v4-scope"
 
 
 def test_active_policy_prioritizes_one_missing_context_question_but_stops_when_user_cannot_supply_it():
     active = dialogue_prompt(TASK, "A")
     assert "不要用常见用法的推断替代尚未确认的作品背景" in active
-    assert "本轮必须只提出一个由你自行选择的最重要的具体问题" in active
-    assert "kind必须为clarification；不要同时给整段译文" in active
-    assert "用户明确无法补充时，必须据已知信息给完整译文，kind为answer" in active
-    assert "已经确认的信息不重复问" in active
+    assert "只要相关设定尚未确认且用户没有说无法补充，本轮必须只问其中一个问题" in active
+    assert "kind必须为clarification；不能先给猜测的最终译文" in active
+    assert "‘完整翻译’不是拒绝澄清，不能本轮直接交付全文" in active
+    assert "用户明确说不要再问、无法再提供背景时，按当前目标保守回答，kind为answer" in active
+    assert "不得扩成全文或捏造事实" in active
+    assert "已确认或明确无法提供的信息不重复问" in active
 
 
-def test_direct_translation_control_prompt_is_byte_identical_after_active_policy_revision():
-    # Frozen before the v2 A-only policy change: the S control must remain intact.
-    assert hashlib.sha256(dialogue_prompt(TASK, "S").encode()).hexdigest() == (
-        "1fb43d1cba8a47041c3f46cc2b6303d27d655eb1ce9d92435c8cfdaf1dc2aa0d")
+def test_both_baseline_prompts_include_the_v4_shared_scope_policy():
+    # v4 changes S as well as A; the earlier byte-identical S assertion no longer applies.
+    for condition in ("S", "A"):
+        assert dialogue_prompt(TASK, condition).endswith("\n" + RESPONSE_SCOPE_POLICY)
+    assert ACTIVE_CLARIFICATION_POLICY not in dialogue_prompt(TASK, "S")
 
 
 @pytest.mark.parametrize("condition", ["S", "O"])
-def test_dialogue_builder_preserves_the_original_control_and_historical_message_sequences(condition):
+def test_dialogue_builder_preserves_history_and_versioned_trailing_messages(condition):
     history = [{"role": "user", "content": "请翻译。"},
                {"role": "assistant", "content": "已有回复。"},
                {"role": "user", "content": "请核对人物指代。"}]
     original = deepcopy(history)
-    expected = [{"role": "system", "content": dialogue_prompt(TASK, condition)}] + original
+    expected = ([{"role": "system", "content": dialogue_prompt(TASK, condition)}] + original
+                + dialogue_message_protocol()["conditions"].get(condition, {}).get("trailing_messages", []))
     result = build_dialogue_messages(TASK, condition, history)
     assert json.dumps(result, ensure_ascii=False) == json.dumps(expected, ensure_ascii=False)
     assert history == original
@@ -180,12 +184,12 @@ def test_active_wire_reminder_follows_the_unchanged_history_and_matches_the_froz
     result = build_dialogue_messages(TASK, "A", history)
     protocol = dialogue_message_protocol()
     assert result[0] == {"role": "system", "content": dialogue_prompt(TASK, "A")}
-    assert result[1:-1] == original and history == original
-    assert result[-1:] == protocol["conditions"]["A"]["trailing_messages"]
+    assert result[1:-2] == original and history == original
+    assert result[-2:] == protocol["conditions"]["A"]["trailing_messages"]
+    assert result[-2] == {"role": "system", "content": RESPONSE_SCOPE_POLICY}
     assert result[-1] == {"role": "system", "content": ACTIVE_CLARIFICATION_POLICY}
-    assert protocol["conditions"]["A"]["order"] == ["initial_system", "history", "trailing_system"]
-    assert protocol["conditions"]["S"]["trailing_messages"] == []
-    assert "用户明确无法补充时，必须据已知信息给完整译文，kind为answer" in result[-1]["content"]
+    assert protocol["version"] == "translation-message-order-v2-scoped"
+    assert protocol["conditions"]["S"]["trailing_messages"] == [{"role": "system", "content": RESPONSE_SCOPE_POLICY}]
     assert "优化模块" not in json.dumps(result, ensure_ascii=False)
 
 
@@ -196,7 +200,7 @@ def test_dialogue_builder_drops_non_dialogue_roles_and_private_history_metadata_
                {"role": "tool", "content": "UNTRUSTED_TOOL_DATA"}]
     original = deepcopy(history)
     result = build_dialogue_messages(TASK, "A", history)
-    assert result[1:-1] == [{"role": "user", "content": "用户提供的背景。"},
+    assert result[1:-2] == [{"role": "user", "content": "用户提供的背景。"},
                            {"role": "assistant", "content": "已有回复。"}]
     assert history == original
     wire = json.dumps(result, ensure_ascii=False)

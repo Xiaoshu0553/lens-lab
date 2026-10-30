@@ -31,7 +31,7 @@ from .translation_provenance import new_provenance, normalized_provenance, audit
 from .translation_exports import export_record, export_dialogue, export_ratings, csv_download
 from .translation_timeline import PresentationTimeline
 from .translation_model import (BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt,
-    dialogue_message_protocol, build_dialogue_messages, parse_reply, demo_reply)
+    dialogue_message_protocol, build_dialogue_messages, complete_dialogue_reply, demo_reply)
 from .translation_purpose import (DEMONSTRATION_PURPOSE, data_purpose, purpose_metadata,
     record_purpose, select_purpose_records)
 
@@ -436,12 +436,13 @@ def register_translation(app, settings, require_admin, optional_basic):
         history = [{k:m[k] for k in ('role','content')} for m in row['messages']]
         history.append(dict(role='user',content=body.content))
         started = time.monotonic()
+        reply_contract_retries = 0
         try:
             if settings.study_mode == 'demo':
                 reply = demo_reply(row['task'],row['condition'],history)
             else:
-                raw = await provider.complete(build_dialogue_messages(row['task'],row['condition'],history))
-                reply = parse_reply(raw)
+                reply,reply_contract_retries,_ = await complete_dialogue_reply(
+                    provider,build_dialogue_messages(row['task'],row['condition'],history))
                 if isinstance(provider,JSONModelProvider):
                     registry.mark_success(provider.connection,provider.last_response_model)
         except (Exception, asyncio.CancelledError) as exc:
@@ -457,6 +458,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                     current['pending'] = None
                     current['requests'][body.request_id]['status']='failed'
                     current['events'].append(dict(type='model_error', code=exc.code if isinstance(exc,ModelError) else 'internal_provider_error',
+                        reply_contract_retries=getattr(exc,'reply_contract_retries',0),
                         json_format_retries=getattr(provider,'format_retry_count',0),created_at=now_utc()))
                     save(db,current)
             if isinstance(exc,asyncio.CancelledError):
@@ -475,6 +477,7 @@ def register_translation(app, settings, require_admin, optional_basic):
             current['pending']=None
             current['requests'][body.request_id]['status']='completed'
             current['events'].append(dict(type='reply',request_id=body.request_id,seconds=round(time.monotonic()-started,3),
+                                          reply_contract_retries=reply_contract_retries,
                                           reported_model=getattr(provider,'last_response_model',None),
                                           json_format_retries=getattr(provider,'format_retry_count',0),
                                           created_at=now_utc()))

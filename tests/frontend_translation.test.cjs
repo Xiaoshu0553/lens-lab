@@ -121,6 +121,18 @@ test('current-cohort record view excludes old model scores until explicitly sele
   h.element('cohort-filter').value = 'historical'; assert.deepEqual(Array.from(h.hooks.filteredRecords(), record => record.id), ['old-model']);
 });
 
+test('admin records default to all versions while statistics remain scoped to the current version', () => {
+  const html = fs.readFileSync(path.join(root, 'static', 'translation-admin.html'), 'utf8');
+  const choices = html.match(/<select id="cohort-filter">([\s\S]*?)<\/select>/)[1];
+  assert.deepEqual(Array.from(choices.matchAll(/<option value="([^"]*)"/g), match => match[1]), ['all', 'current', 'historical']);
+  assert.match(html, /以下按当前版本的翻译会话计数/);
+  assert.match(html, /研究者试跑和历史版本分开保存/);
+  const h = harness({admin: true});
+  for (const id of ['cohort-filter', 'kind-filter', 'condition-filter', 'assessment-filter']) h.element(id).value = 'all';
+  h.hooks.prime({records: [{id: 'current', current_cohort: true}, {id: 'previous', current_cohort: false}]});
+  assert.deepEqual(Array.from(h.hooks.filteredRecords(), record => record.id), ['current', 'previous']);
+});
+
 test('admin record list shows configuration scope without reading record runtime mode', () => {
   const h = harness({admin: true});
   for (const id of ['cohort-filter', 'kind-filter', 'condition-filter', 'assessment-filter']) h.element(id).value = 'all';

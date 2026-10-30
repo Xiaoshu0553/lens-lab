@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from app.db import connect
 from app.main import create_app
 from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK
-from app.translation_model import ACTIVE_CLARIFICATION_POLICY, dialogue_message_protocol, dialogue_prompt
+from app.translation_model import ACTIVE_CLARIFICATION_POLICY, RESPONSE_SCOPE_POLICY, dialogue_message_protocol, dialogue_prompt
 from app.translation_quality import RUBRIC
 from test_flow import auth, settings
 from test_translation_flow import assert_standard_export_fields
@@ -119,7 +119,7 @@ def test_baseline_clarification_never_calls_optimizer_or_reads_hidden_answers(tm
     assert not _record(client, sid)["events"][-1].get("optimizer")
 
 
-def test_dialogue_wire_order_is_frozen_and_only_active_adds_a_trailing_system_reminder(tmp_path):
+def test_dialogue_wire_order_freezes_shared_scope_and_active_only_clarification(tmp_path):
     for condition in ("S", "A"):
         location = tmp_path / condition
         location.mkdir()
@@ -140,15 +140,18 @@ def test_dialogue_wire_order_is_frozen_and_only_active_adds_a_trailing_system_re
         assert protocol == dialogue_message_protocol()
         assert wire == [{"role": "system", "content": dialogue_prompt(TASK, condition)}] + original_history + protocol["conditions"][condition]["trailing_messages"]
         if condition == "A":
+            assert wire[-2] == {"role": "system", "content": RESPONSE_SCOPE_POLICY}
             assert wire[-1] == {"role": "system", "content": ACTIVE_CLARIFICATION_POLICY}
         else:
-            assert wire[-1] == original_history[-1]
+            assert wire[-1] == {"role": "system", "content": RESPONSE_SCOPE_POLICY}
+            assert wire[-2] == original_history[-1]
+        assert protocol["version"] == "translation-message-order-v2-scoped"
         latest = _record(client, sid)
         assert len(latest["messages"]) == 4
         assert all(message["role"] in {"user", "assistant"} for message in latest["messages"])
         materials = client.get("/api/admin/translation/materials", headers=auth()).json()
         assert materials["message_protocol"] == protocol
-        assert materials["versions"]["prompt"] == "translation-dialogue-v3"
+        assert materials["versions"]["prompt"] == "translation-dialogue-v4-scope"
 
 
 def test_five_judges_receive_same_blind_submission_and_frozen_common_background(tmp_path):
