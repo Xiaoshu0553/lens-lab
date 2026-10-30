@@ -18,6 +18,7 @@ from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK
 from app.translation_model import ACTIVE_CLARIFICATION_POLICY, dialogue_message_protocol, dialogue_prompt
 from app.translation_quality import RUBRIC
 from test_flow import auth, settings
+from test_translation_flow import assert_standard_export_fields
 from translation_multi_model_helpers import configure_panel
 
 
@@ -329,7 +330,7 @@ def test_limits_change_invalidates_freeze_but_old_session_keeps_original_limits(
     assert restored.json()["remaining_seconds"] <= 20 * 60
 
 
-def test_rating_exports_keep_totals_and_researcher_preview_provenance(tmp_path):
+def test_rating_exports_keep_totals_and_record_kind_without_technical_fields(tmp_path):
     app = create_app(settings(tmp_path, "pilot"))
     client = TestClient(app)
     provider = RecordingProvider()
@@ -343,12 +344,15 @@ def test_rating_exports_keep_totals_and_researcher_preview_provenance(tmp_path):
     assert response.status_code == 200
     ratings = response.json()
     assert len(ratings) == 5
-    assert all(row["record_kind"] == "researcher_preview" and row["study_mode"] == "pilot" for row in ratings)
+    assert all(row["record_kind"] == "researcher_preview" for row in ratings)
+    assert_standard_export_fields(ratings)
+    assert _record(client, sid)["study_mode"] == "pilot"
     assert all(row["total"] == 80 for row in ratings)
     response = client.get("/api/admin/translation/export?kind=ratings&format=csv", headers=auth())
     rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
     assert len(rows) == 5
-    assert all(row["record_kind"] == "researcher_preview" and row["study_mode"] == "pilot" for row in rows)
+    assert all(row["record_kind"] == "researcher_preview" for row in rows)
+    assert_standard_export_fields(rows)
     assert all(float(row["total"]) == 80 for row in rows)
 
 

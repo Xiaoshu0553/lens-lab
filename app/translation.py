@@ -4,9 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from copy import deepcopy
-import csv
 import hashlib
-import io
 import json
 import secrets
 import statistics
@@ -30,6 +28,7 @@ from .translation_quality import RUBRIC, parse_rating
 from .translation_panel_quality import (PANEL_VERSION, REPEATED_PANEL_VERSION, MODEL_MIN, MODEL_MAX,
     scoring_prompt, validate_panel, aggregate_model_ratings, validate_response_identities)
 from .translation_provenance import new_provenance, normalized_provenance, audit_records
+from .translation_exports import export_record, export_dialogue, export_ratings, csv_download
 from .translation_model import (BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt,
     dialogue_message_protocol, build_dialogue_messages, parse_reply, demo_reply)
 from .translation_purpose import (DEMONSTRATION_PURPOSE, data_purpose, purpose_metadata,
@@ -779,62 +778,14 @@ def register_translation(app, settings, require_admin, optional_basic):
         with connect(settings.database_path) as db:
             rows=records(db)
         if kind=='records':
-            data=[admin_row(r,True) for r in rows]
+            active_batch=current_evaluation_batch()
+            data=[export_record(row,assessment_for_batch(row,active_batch) or row.get('assessment')) for row in rows]
         elif kind=='dialogue':
-            data=[dict(id=r['id'],condition=r['condition'],band=r['band'],record_kind=r['record_kind'],data_purpose=record_purpose(r),
-                       collection_method=normalized_provenance(r)['collection_method'],
-                       collection_batch_id=normalized_provenance(r).get('batch_id'),
-                       cohort_id=r['cohort_id'],study_mode=r['study_mode'],**m) for r in rows for m in r['messages']]
+            data=[message for row in rows for message in export_dialogue(row)]
         else:
-            data=[]
-            for r in rows:
-                assessments=[*r.get('assessment_history',[])]
-                if r.get('assessment'):
-                    assessments.append(r['assessment'])
-                for assessment in assessments:
-                  for rating in assessment.get('ratings',[]):
-                    legacy='model_id' not in rating
-                    ident=rating.get('model_id',rating.get('expert_id'))
-                    totals=assessment.get('model_totals',assessment.get('expert_totals',{}))
-                    trimmed=assessment.get('trimmed_model_ids',assessment.get('trimmed_expert_ids',[]))
-                    data.append({**dict(id=r['id'],condition=r['condition'],band=r['band'],cohort_id=r['cohort_id'],
-                        record_kind=r['record_kind'],data_purpose=record_purpose(r),study_mode=r['study_mode'],rubric_version=r['versions']['rubric']),
-                        'collection_method':normalized_provenance(r)['collection_method'],
-                        'collection_batch_id':normalized_provenance(r).get('batch_id'),
-                        'evaluation_batch_id':assessment.get('evaluation_batch_id'),
-                        'evaluation_mode':assessment.get('evaluation_mode','distinct_models'),
-                        'independent_model_count':assessment.get('independent_model_count'),
-                        'session_count':assessment.get('session_count',len(assessment.get('ratings',[]))),
-                        'submission_sha256':assessment.get('submission_sha256'),
-                        'scoring_prompt_sha256':assessment.get('scoring_prompt_sha256'),
-                        **rating,'total':totals.get(ident),'trimmed':ident in trimmed,
-                        'evaluation_type':assessment.get('evaluation_type','legacy-role-panel' if legacy else 'distinct-model-panel')})
+            data=[rating for row in rows for rating in export_ratings(row)]
         filename=f'translation-{kind}.{format}'
         headers={'Content-Disposition':f'attachment; filename="{filename}"','Cache-Control':'no-store'}
         if format=='json':
             return Response(_dump(data),media_type='application/json',headers=headers)
-        # Flat analysis fields plus serialized audit structures, preserving zero and null.
-        columns=(['id','created_at','ended_at','created_at_event','ended_at_event','duration_scope',
-                 'record_kind','data_purpose','collection_method','collection_batch_id','provenance','study_mode','cohort_id','current_cohort','condition','band',
-                 'age_band','education_stage','undergraduate_year','eligibility_version','translation_experience',
-                 'ability_score','assessment_status','evaluation_batch_id','score','needs_review','turns','duration_seconds','submission',
-                 'answers','self_answers','ability','feedback','assessment','assessment_history','versions','model_config'] if kind=='records'
-                 else ['id','condition','band','record_kind','data_purpose','collection_method','collection_batch_id','cohort_id','study_mode','role','content','action','created_at'] if kind=='dialogue'
-                 else ['id','condition','band','record_kind','data_purpose','collection_method','collection_batch_id','study_mode','cohort_id','rubric_version','evaluation_batch_id',
-                       'evaluation_mode','evaluation_type','independent_model_count','session_count','submission_sha256','scoring_prompt_sha256',
-                       'model_id','label','model','base_url','weight','normalized_weight','scores','evidence',
-                       'critical_errors','total','trimmed','seconds','reported_model','response_metadata','raw_response','reused','expert_id'])
-        buffer=io.StringIO(newline='')
-        writer=csv.DictWriter(buffer,fieldnames=columns,extrasaction='ignore')
-        writer.writeheader()
-        for row in data:
-            safe={}
-            for key in columns:
-                value=row.get(key)
-                if isinstance(value,(list,dict)):
-                    value=_dump(value)
-                if isinstance(value,str) and (value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r','\n'))):
-                    value="'"+value
-                safe[key]='' if value is None else value
-            writer.writerow(safe)
-        return Response('\ufeff'+buffer.getvalue(),media_type='text/csv; charset=utf-8',headers=headers)
+        return Response(csv_download(data,kind),media_type='text/csv; charset=utf-8',headers=headers)

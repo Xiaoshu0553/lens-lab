@@ -14,6 +14,33 @@ from test_flow import auth, settings
 from translation_multi_model_helpers import configure_panel, panel_models
 
 
+TECHNICAL_EXPORT_FIELDS = {
+    'data_purpose', 'collection_method', 'collection_batch_id', 'provenance',
+    'study_mode', 'cohort_id', 'eligibility_version', 'versions', 'assessment',
+    'assessment_history', 'raw_response', 'response_metadata', 'base_url',
+    'model_config', 'material_snapshot', 'evaluator_config',
+}
+
+
+def assert_standard_export_fields(value):
+    """Check ordinary download structures without inspecting participant text."""
+    if isinstance(value, dict):
+        assert not TECHNICAL_EXPORT_FIELDS & value.keys()
+        assert not any(key.endswith(('_sha256', '_batch_id')) for key in value)
+        for key, item in value.items():
+            # CSV serializes the business structures as JSON cells.
+            if key in {'answers', 'self_answers', 'feedback', 'aggregate', 'scores',
+                       'evidence', 'critical_errors'} and isinstance(item, str):
+                try:
+                    item = json.loads(item)
+                except (ValueError, TypeError):
+                    pass
+            assert_standard_export_fields(item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_standard_export_fields(item)
+
+
 def payload(**changes):
     value = {
         'consent': True, 'university_confirmed': True,
@@ -73,7 +100,8 @@ def test_translation_undergraduate_background_is_retained_in_auditable_exports(t
     exported = list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
     assert exported[0]['age_band'] == '23-plus'
     assert exported[0]['undergraduate_year'] == 'year-5-plus'
-    assert exported[0]['eligibility_version'] == scope['version']
+    assert exported[0]['education_stage'] == 'bachelor'
+    assert_standard_export_fields(exported)
 
 
 def test_translation_form_and_session_hide_answers_condition_and_quality_keys(tmp_path):
@@ -217,10 +245,12 @@ def test_translation_exports_keep_quoted_text_and_neutralize_csv_formulas(tmp_pa
             return [v for item in value for v in values(item)]
         return [value]
     assert text in values(exported.json())
+    assert_standard_export_fields(exported.json())
     response = client.get('/api/admin/translation/export?format=csv&kind=records', headers=auth())
     assert response.status_code == 200
     rows = list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
     assert len(rows) == 1
+    assert_standard_export_fields(rows)
     assert not any(value and value.startswith('=HYPERLINK') for value in rows[0].values())
 
 
@@ -352,10 +382,12 @@ def test_translation_panel_blinds_participant_metadata_and_freezes_complete_rati
     assert len(exported) == 5 and {item['model_id'] for item in exported} == {e['id'] for e in panel_models()}
     assert all(item['total'] == result['model_totals'][item['model_id']] for item in exported)
     assert {item['model_id'] for item in exported if item['trimmed']} == set(result['trimmed_model_ids'])
-    assert all(item['record_kind'] == 'researcher_preview' and item['study_mode'] == 'pilot' for item in exported)
+    assert all(item['record_kind'] == 'researcher_preview' for item in exported)
+    assert_standard_export_fields(exported)
     ratings_csv = client.get('/api/admin/translation/export?format=csv&kind=ratings', headers=auth())
     flat = list(csv.DictReader(io.StringIO(ratings_csv.content.decode('utf-8-sig'))))
     assert len(flat) == 5 and all(float(item['total']) == 84.25 for item in flat)
+    assert_standard_export_fields(flat)
 
 
 def test_translation_incomplete_panel_does_not_publish_a_partial_average(tmp_path):

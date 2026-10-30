@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from test_flow import auth, settings
-from test_translation_flow import payload, dialogue
+from test_translation_flow import payload, dialogue, assert_standard_export_fields
 
 
 def test_presentation_flow_retains_technical_purpose_and_original_records(tmp_path):
@@ -28,12 +28,17 @@ def test_presentation_flow_retains_technical_purpose_and_original_records(tmp_pa
         assert summary['data_purpose'] == 'demonstration'
         rows = client.get('/api/admin/translation/export', headers=auth()).json()
         indexed = {row['id']: row for row in rows}
-        assert indexed[original]['data_purpose'] == 'research'
-        assert indexed[sid]['data_purpose'] == 'demonstration'
+        assert set(indexed) == {original, sid}
+        assert indexed[sid]['submission'] == translation
+        assert_standard_export_fields(rows)
+        for record_id, expected in ((original, 'research'), (sid, 'demonstration')):
+            detail = client.get(f'/api/admin/translation/records/{record_id}', headers=auth()).json()
+            assert detail['data_purpose'] == expected
         for kind in ('records', 'dialogue'):
             result = client.get('/api/admin/translation/export', params={'kind': kind, 'format': 'csv'}, headers=auth())
             exported = list(csv.DictReader(io.StringIO(result.text.lstrip('\ufeff'))))
-            assert any(row['id'] == sid and row['data_purpose'] == 'demonstration' for row in exported)
+            assert any(row['id'] == sid for row in exported)
+            assert_standard_export_fields(exported)
     with TestClient(create_app(base)) as research:
         assert research.get('/api/admin/translation/summary', headers=auth()).json()['counts']['total'] == 1
 

@@ -23,7 +23,7 @@ from app.main import create_app
 from app.translation_connections import JSONModelProvider
 from app.translation_quality import RUBRIC
 from test_flow import auth, settings
-from test_translation_flow import payload
+from test_translation_flow import payload, assert_standard_export_fields
 from translation_multi_model_helpers import panel_models
 
 
@@ -344,7 +344,7 @@ def test_real_provider_missing_or_conflicting_response_identity_never_creates_a_
     assert _summary(client)['counts']['scored'] == 0
 
 
-def test_data_audit_and_technical_exports_keep_source_separate_from_purpose_and_duration(api):
+def test_data_audit_keeps_source_separate_while_standard_exports_keep_business_fields(api):
     _, client, _ = api
     sid = _complete(client, provenance={'version': 1, 'collection_method': 'automated_script',
                                       'batch_id': 'forged-client-origin', 'evidence': []})
@@ -363,15 +363,23 @@ def test_data_audit_and_technical_exports_keep_source_separate_from_purpose_and_
     assert row['duration_seconds'] == round(actual, 2)
     exported = _get(client, '/api/admin/translation/export?format=json&kind=records')
     indexed = {item['id']: item for item in exported}
-    assert indexed[sid]['collection_method'] == 'unverified'
-    assert indexed[preview]['collection_method'] == 'researcher_preview'
-    assert indexed[sid]['duration_scope'] == row['duration_scope']
+    assert set(indexed) == {sid, preview}
+    assert indexed[sid]['record_kind'] == 'participant'
+    assert indexed[preview]['record_kind'] == 'researcher_preview'
+    assert indexed[sid]['duration_seconds'] == row['duration_seconds']
+    assert indexed[sid]['submission'] == row['submission']
+    assert indexed[sid]['answers'] == row['answers']
+    assert_standard_export_fields(exported)
+    assert _record(client, preview)['collection_method'] == 'researcher_preview'
     csv_response = client.get('/api/admin/translation/export?format=csv&kind=records', headers=auth())
     assert csv_response.status_code == 200
     csv_rows = list(csv.DictReader(io.StringIO(csv_response.text.lstrip('\ufeff'))))
     csv_indexed = {item['id']: item for item in csv_rows}
-    assert csv_indexed[sid]['collection_method'] == 'unverified'
-    assert csv_indexed[sid]['collection_batch_id'] == ''
-    assert csv_indexed[sid]['duration_scope'] == row['duration_scope']
-    assert json.loads(csv_indexed[sid]['provenance']) == row['provenance']
+    assert set(csv_indexed) == {sid, preview}
+    assert float(csv_indexed[sid]['duration_seconds']) == row['duration_seconds']
+    assert json.loads(csv_indexed[sid]['answers']) == row['answers']
+    assert_standard_export_fields(csv_rows)
+    after = _record(client, sid)
+    assert after['provenance'] == row['provenance']
+    assert after['collection_method'] == row['collection_method']
     assert 'offline-test-key' not in csv_response.text + json.dumps(exported)

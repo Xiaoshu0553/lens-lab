@@ -19,7 +19,7 @@ from app.main import create_app
 from app.translation_connections import ConnectionRegistry, JSONModelProvider
 from app.translation_quality import RUBRIC
 from test_flow import auth, settings
-from test_translation_flow import payload
+from test_translation_flow import payload, assert_standard_export_fields
 from translation_multi_model_helpers import panel_models, configure_panel
 
 
@@ -159,7 +159,9 @@ def test_multi_model_panel_sends_identical_five_dimension_blind_prompt_and_norma
         assert not any(key in wire for key in ('ability_score', 'self_answers', 'preview_condition'))
     exported = client.get('/api/admin/translation/export?format=json&kind=records', headers=auth())
     assert 'test-secret' not in exported.text
+    assert_standard_export_fields(exported.json())
     ratings = client.get('/api/admin/translation/export?format=json&kind=ratings', headers=auth()).json()
+    assert_standard_export_fields(ratings)
     assert {item['model_id'] for item in ratings} == {item['id'] for item in models}
     assert all(item['total'] == values[item['model']] for item in ratings)
     assert {item['model_id'] for item in ratings if item['trimmed']} == {'judge1', 'judge5'}
