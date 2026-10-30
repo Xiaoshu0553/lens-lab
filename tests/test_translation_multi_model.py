@@ -35,6 +35,7 @@ def mock_http(monkeypatch, handler):
 
 def completion(request, content):
     return httpx.Response(200, request=request, json={
+        'model': json.loads(request.content)['model'],
         'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(content, ensure_ascii=False)}}]})
 
 

@@ -218,7 +218,7 @@ def test_partial_judge_failure_never_produces_a_partial_average_and_can_retry(tm
     assert response.status_code == 502
     row = _record(client, sid)
     assert row["assessment"] is None and row["evaluation_pending"] is None
-    assert row["assessment_status"] == "pending"
+    assert row["assessment_status"] == "failed"
     assert row["events"][-1]["type"] == "evaluation_failed" and row["events"][-1]["successes"] == 4
     provider.bad_judge = None
     response = client.post(f"/api/admin/translation/records/{sid}/evaluate", headers=auth())

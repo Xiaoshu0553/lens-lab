@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from copy import deepcopy
 import csv
 import hashlib
@@ -26,7 +27,9 @@ from .translation_materials import (PROJECT_TITLE, DESIGN_VERSION, FORM_VERSION,
     RUBRIC_VERSION, PROMPT_VERSION, FORM_ITEMS, SELF_ITEMS, TASK,
     MATERIAL_STATUS, public_form, public_task, score_form)
 from .translation_quality import RUBRIC, parse_rating
-from .translation_panel_quality import PANEL_VERSION, MODEL_MIN, MODEL_MAX, scoring_prompt, validate_panel, aggregate_model_ratings
+from .translation_panel_quality import (PANEL_VERSION, REPEATED_PANEL_VERSION, MODEL_MIN, MODEL_MAX,
+    scoring_prompt, validate_panel, aggregate_model_ratings, validate_response_identities)
+from .translation_provenance import new_provenance, normalized_provenance, audit_records
 from .translation_model import (BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt,
     dialogue_message_protocol, build_dialogue_messages, parse_reply, demo_reply)
 from .translation_purpose import (DEMONSTRATION_PURPOSE, data_purpose, purpose_metadata,
@@ -90,6 +93,12 @@ class FreezeRequest(BaseModel):
     confirmed: StrictBool
 
 
+class EvaluationRequest(BaseModel):
+    evaluation_batch_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
+    submission_sha256: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
+    allow_reassessment: StrictBool = False
+
+
 def _dump(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
@@ -110,12 +119,15 @@ def register_translation(app, settings, require_admin, optional_basic):
     registry=ConnectionRegistry(settings)
     app.state.translation_registry=registry
     material,material_id,cohort_id,model_config,panel_config={},'','',{},[]
+    evaluation_mode='distinct_models'
 
     def refresh_configuration():
-        nonlocal material,material_id,cohort_id,model_config,panel_config
+        nonlocal material,material_id,cohort_id,model_config,panel_config,evaluation_mode
         connections=registry.connections()
+        evaluation_mode=connections.get('evaluation_mode','distinct_models')
+        evaluator_connections=registry.evaluation_connections()
         model_config=public_connection(connections['dialogue'])
-        panel_config=[public_connection(c) for c in connections['judges']]
+        panel_config=[public_connection(c) for c in evaluator_connections]
         # Freeze actual prompts and model weights, never connection credentials.
         material=dict(versions=versions,eligibility=PARTICIPANT_SCOPE,form=dict(items=FORM_ITEMS,self_items=SELF_ITEMS),task=TASK,
             rubric=RUBRIC,models=panel_config,prompts={c:dialogue_prompt(TASK,c) for c in CONDITIONS},
@@ -128,15 +140,31 @@ def register_translation(app, settings, require_admin, optional_basic):
         cohort_id=_hash(dict(material_id=collection_material_id,model=model_config,mode=settings.study_mode,limits=limits,
                             data_purpose=data_purpose(settings)))
         app.state.translation_provider=JSONModelProvider(connections['dialogue'])
-        app.state.translation_judge_providers={c['id']:JSONModelProvider(c) for c in connections['judges']}
+        app.state.translation_judge_providers={c['id']:JSONModelProvider(c) for c in evaluator_connections}
 
     refresh_configuration()
 
-    def evaluation_batch(snapshot, models, collection_cohort):
-        return _hash(dict(cohort_id=collection_cohort,scoring_prompt=snapshot['scoring_prompt'],
+    def evaluation_prompt(snapshot, mode):
+        if mode=='distinct_models':
+            return snapshot['scoring_prompt']
+        # The original task and rubric stay frozen. Only the explicitly selected
+        # evaluation protocol changes; no questionnaire/condition enters judging.
+        if snapshot['rubric'] != RUBRIC:
+            raise ValueError('历史量规与当前评分器不同，须先建立兼容的独立评审批次')
+        # Session JSON is serialized with sorted keys. Canonicalize this new
+        # protocol too, so in-memory and restored task dictionaries freeze the
+        # exact same prompt bytes without changing the legacy distinct prompt.
+        return scoring_prompt(json.loads(_dump(snapshot['task'])),mode=mode)
+
+    def evaluation_batch(snapshot, models, collection_cohort, mode=None):
+        mode=evaluation_mode if mode is None else mode
+        payload=dict(cohort_id=collection_cohort,scoring_prompt=evaluation_prompt(snapshot,mode),
             rubric=snapshot['rubric'],rubric_version=snapshot['versions']['rubric'],
             panel_version=PANEL_VERSION,models=sorted(deepcopy(models),key=lambda model:model['id']),
-            temperature=0))
+            temperature=0)
+        if mode!='distinct_models':
+            payload.update(evaluation_mode=mode,panel_version=REPEATED_PANEL_VERSION)
+        return _hash(payload)
 
     def current_evaluation_batch():
         # Call under the same DB transaction that serializes configuration swaps.
@@ -147,11 +175,14 @@ def register_translation(app, settings, require_admin, optional_basic):
     def backend_status():
         status=registry.snapshot()
         return dict(dialogue_backend='rule_simulation' if settings.study_mode=='demo' else 'model_api',
-                    evaluation_backend='disabled_demo' if settings.study_mode=='demo' else 'multi_model_api',
+                    evaluation_backend=('disabled_demo' if settings.study_mode=='demo' else
+                        'same_model_repeated_api' if evaluation_mode=='repeated_sessions' else 'multi_model_api'),
                     model_api_verified=status['model_api_verified'],
                     model_api_verified_at=status['dialogue']['verified_at'],
                     model_api_last_error=status['dialogue'].get('last_error'),panel_ready=status['panel']['ready'],
-                    model_count=len(status['judges']),
+                    model_count=status['panel'].get('independent_model_count',len(status['judges'])),
+                    independent_model_count=status['panel'].get('independent_model_count',len(status['judges'])),
+                    evaluation_mode=evaluation_mode,evaluation_session_count=len(status['judges']),
                     model_verifications=[dict(id=c['id'],model=c['model'],verified_at=c['verified_at']) for c in status['judges']])
     with connect(settings.database_path) as db:
         db.executescript('''
@@ -197,7 +228,17 @@ def register_translation(app, settings, require_admin, optional_basic):
             pending = row.get(field)
             if pending and time.time() - pending['started'] > 600:
                 row[field] = None
-                row['events'].append(dict(type=field + '_expired', created_at=now_utc()))
+                row['events'].append(dict(type=field + '_expired',pending_snapshot=deepcopy(pending),created_at=now_utc()))
+                if field=='evaluation_pending':
+                    row['assessment_status']='failed'
+
+    def assessment_for_batch(row, batch_id):
+        if not batch_id:
+            return None
+        for assessment in [row.get('assessment'),*row.get('assessment_history',[])]:
+            if assessment and assessment.get('evaluation_batch_id')==batch_id:
+                return assessment
+        return None
 
     def view(row):
         turns = sum(m['role'] == 'assistant' for m in row['messages'])
@@ -225,6 +266,14 @@ def register_translation(app, settings, require_admin, optional_basic):
         if full:
             result.update(row)
             result['current_cohort'] = row['cohort_id']==cohort_id
+        provenance=normalized_provenance(row)
+        active_batch=current_evaluation_batch()
+        active_assessment=assessment_for_batch(row,active_batch)
+        result.update(provenance=provenance,collection_method=provenance['collection_method'],
+            collection_batch_id=provenance.get('batch_id'),duration_scope='translation_session_after_questionnaire',
+            created_at_event='translation_session_created_after_questionnaire',ended_at_event='final_translation_submitted',
+            active_evaluation_batch_id=active_batch,active_assessment=active_assessment,
+            current_evaluation_batch=bool(active_assessment))
         return result
 
     @app.get('/api/translation/info')
@@ -318,6 +367,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                 undergraduate_year=body.undergraduate_year, eligibility_version=ELIGIBILITY_VERSION,
                 university_confirmed=True, translation_experience=body.translation_experience,
                 record_kind=kind, study_mode=settings.study_mode, data_purpose=data_purpose(settings), cohort_id=cohort_id,
+                provenance=new_provenance(kind),
                 material_id=material_id, versions=versions, model_config=model_config, limits=limits,
                 material_snapshot=material, task=TASK, created_at=now_utc(), ended_at=None,
                 draft='', submission=None, messages=[], events=[], requests={}, pending=None,
@@ -488,7 +538,10 @@ def register_translation(app, settings, require_admin, optional_basic):
             return admin_row(load(db,sid),True)
 
     @app.post('/api/admin/translation/records/{sid}/evaluate')
-    async def translation_evaluate(sid: str, admin=Depends(require_admin)):
+    async def translation_evaluate(sid: str, request: Request, body: EvaluationRequest | None=None,
+                                   admin=Depends(require_admin)):
+        require_same_origin(request)
+        body=body or EvaluationRequest()
         attempt = str(uuid.uuid4())
         with connect(settings.database_path) as db:
             db.execute('BEGIN IMMEDIATE')
@@ -498,26 +551,88 @@ def register_translation(app, settings, require_admin, optional_basic):
                 raise HTTPException(409,'请先提交最终译文')
             if row['study_mode']=='demo':
                 raise HTTPException(409,'规则演示不生成研究评分，请使用真实模型预测试')
-            if row.get('assessment'):
+            submission_hash=hashlib.sha256(row['submission'].encode()).hexdigest()
+            if body.submission_sha256 and body.submission_sha256!=submission_hash:
+                raise HTTPException(409,'译文摘要已变化，未调用评审API')
+            # Older callers requesting an already completed result remain read-only.
+            if row.get('assessment') and not body.evaluation_batch_id and not body.allow_reassessment:
                 return row['assessment']
+            if not registry.snapshot()['panel']['ready']:
+                raise HTTPException(409,'请先配置完整评审方案：不同模型评审，或明确选择同模型多会话重复评审')
+            if row.get('evaluation_pending'):
+                raise HTTPException(409,'评审正在运行，请稍后同步结果')
             if row['cohort_id'] != cohort_id:
                 raise HTTPException(409,'配置已变化，请在原模型与材料配置下评审，避免混合评分')
-            if not registry.snapshot()['panel']['ready']:
-                raise HTTPException(409,'请先在“模型与API”中配置至少五个不同AI；不能用同一模型的多个角色代替')
-            if row.get('evaluation_pending'):
-                raise HTTPException(409,'专家团正在评分，请稍后刷新')
+            fixed_mode=evaluation_mode
             late_panel=(data_purpose(settings)==DEMONSTRATION_PURPOSE
                         and record_purpose(row)==DEMONSTRATION_PURPOSE)
             fixed_panel=deepcopy(panel_config if late_panel else row['material_snapshot']['models'])
+            # Repeated sessions are an explicitly selected new evaluation protocol,
+            # not a relabeling of distinct-model results in the collection snapshot.
+            if fixed_mode=='repeated_sessions':
+                fixed_panel=deepcopy(panel_config)
             fixed_providers=dict(app.state.translation_judge_providers)
-            prompt=row['material_snapshot']['scoring_prompt']
-            batch_id=evaluation_batch(row['material_snapshot'],fixed_panel,row['cohort_id'])
+            try:
+                validate_panel(fixed_panel,mode=fixed_mode)
+                prompt=evaluation_prompt(row['material_snapshot'],fixed_mode)
+                batch_id=evaluation_batch(row['material_snapshot'],fixed_panel,row['cohort_id'],fixed_mode)
+            except ValueError as exc:
+                raise HTTPException(409,str(exc)) from exc
+            if body.evaluation_batch_id and body.evaluation_batch_id!=batch_id:
+                raise HTTPException(409,'评审批次已变化，未调用评审API')
+            stored=assessment_for_batch(row,batch_id)
+            if stored:
+                return stored
+            if row.get('assessment'):
+                if not body.allow_reassessment:
+                    raise HTTPException(409,'已有其他批次评分；须明确启动新批次，原结果会保留')
+            prompt_hash=hashlib.sha256(prompt.encode()).hexdigest()
+            cached={}
+            expected_ids={model['id'] for model in fixed_panel}
+            # Reuse only the first valid result for this exact immutable protocol
+            # and submission. A configuration change never carries scores across.
+            for event in row.get('events',[]):
+                if (event.get('type')!='evaluation_failed' or event.get('evaluation_batch_id')!=batch_id
+                        or event.get('submission_sha256')!=submission_hash
+                        or event.get('scoring_prompt_sha256')!=prompt_hash):
+                    continue
+                if event.get('identity_failure'):
+                    cached.clear()
+                    continue
+                for rating in event.get('partial_ratings',[]):
+                    ident=rating.get('model_id')
+                    if ident not in expected_ids or ident in cached:
+                        continue
+                    if (isinstance(fixed_providers[ident],JSONModelProvider)
+                            and not (isinstance(rating.get('reported_model'),str) and rating['reported_model'].strip())):
+                        continue
+                    try:
+                        parse_rating(_dump({key:rating.get(key) for key in ('scores','evidence','critical_errors')}))
+                    except (ValueError,TypeError):
+                        continue
+                    cached[ident]=deepcopy(rating)
+                try:
+                    # Missing slots remain explicitly unreported while checking
+                    # consistency among observed partial identities. Conflicting
+                    # partial results are never selectively retained.
+                    validate_response_identities([
+                        cached.get(model['id'],dict(model_id=model['id'],reported_model=None))
+                        for model in fixed_panel],fixed_panel,mode=fixed_mode)
+                except ValueError:
+                    cached.clear()
             row['evaluation_pending']=dict(attempt=attempt,started=time.time(),
-                evaluation_batch_id=batch_id,evaluator_config=fixed_panel)
+                evaluation_batch_id=batch_id,evaluator_config=fixed_panel,evaluation_mode=fixed_mode,
+                submission_sha256=submission_hash,scoring_prompt_sha256=prompt_hash)
+            row['assessment_status']='evaluating'
+            row['events'].append(dict(type='evaluation_started',attempt=attempt,evaluation_batch_id=batch_id,
+                evaluation_mode=fixed_mode,submission_sha256=submission_hash,scoring_prompt_sha256=prompt_hash,
+                cached_results=len(cached),new_calls=len(fixed_panel)-len(cached),created_at=now_utc()))
             save(db,row)
         async def judge(model):
-            # Every distinct model gets exactly the same prompt and submission.
-            # No band, condition, pretest, dialogue, or other model's scores.
+            if model['id'] in cached:
+                return cached[model['id']]
+            # Every call starts a fresh context with the same complete five-axis
+            # rubric. No role specialization, dialogue, group or prior score.
             provider=fixed_providers[model['id']]
             started=time.monotonic()
             raw=await provider.complete([
@@ -527,7 +642,9 @@ def register_translation(app, settings, require_admin, optional_basic):
             if isinstance(provider,JSONModelProvider):
                 registry.mark_success(provider.connection,provider.last_response_model)
             return dict(model_id=model['id'],seconds=round(time.monotonic()-started,3),
-                        reported_model=getattr(provider,'last_response_model',None),**rating)
+                        reported_model=getattr(provider,'last_response_model',None),
+                        response_metadata=deepcopy(getattr(provider,'last_response_metadata',None)),
+                        raw_response=raw,**rating)
         try:
             judged=await asyncio.gather(*(judge(model) for model in fixed_panel),return_exceptions=True)
         except asyncio.CancelledError:
@@ -538,11 +655,23 @@ def register_translation(app, settings, require_admin, optional_basic):
                     current=json.loads(found['record_json'])
                     if (current.get('evaluation_pending') or {}).get('attempt')==attempt:
                         current['evaluation_pending']=None
+                        current['assessment_status']='failed'
                         current['events'].append(dict(type='evaluation_cancelled',
-                            evaluation_batch_id=batch_id,evaluator_config=fixed_panel,created_at=now_utc()))
+                            evaluation_batch_id=batch_id,evaluator_config=fixed_panel,evaluation_mode=fixed_mode,
+                            submission_sha256=submission_hash,scoring_prompt_sha256=prompt_hash,created_at=now_utc()))
                         save(db,current)
             raise
         errors=[r for r in judged if isinstance(r,BaseException)]
+        identity_error=None
+        assessment=None
+        if not errors:
+            try:
+                identities=validate_response_identities(judged,fixed_panel,mode=fixed_mode,
+                    require_reported=all(isinstance(fixed_providers[m['id']],JSONModelProvider) for m in fixed_panel))
+                assessment=aggregate_model_ratings(judged,fixed_panel,mode=fixed_mode)
+                assessment.update(identities)
+            except ValueError as exc:
+                identity_error=str(exc)
         for index,result in enumerate(judged):
             provider=fixed_providers[fixed_panel[index]['id']]
             if isinstance(result,BaseException) and isinstance(provider,JSONModelProvider):
@@ -553,24 +682,40 @@ def register_translation(app, settings, require_admin, optional_basic):
             if not current.get('evaluation_pending') or current['evaluation_pending']['attempt'] != attempt:
                 raise HTTPException(409,'评分请求已失效，请刷新')
             current['evaluation_pending']=None
-            if errors:
+            if errors or identity_error:
+                current['assessment_status']='failed'
                 current['events'].append(dict(type='evaluation_failed',successes=len(judged)-len(errors),
-                    evaluation_batch_id=batch_id,evaluator_config=fixed_panel,
-                    partial_ratings=[rating for rating in judged if not isinstance(rating,BaseException)],
+                    evaluation_batch_id=batch_id,evaluator_config=fixed_panel,evaluation_mode=fixed_mode,
+                    submission_sha256=submission_hash,scoring_prompt_sha256=prompt_hash,
+                    identity_failure=identity_error,
+                    partial_ratings=[] if identity_error else [rating for rating in judged if not isinstance(rating,BaseException)],
                     failures=[dict(model_id=fixed_panel[index]['id'],code=result.code if isinstance(result,ModelError) else 'invalid_model_rating')
+                              | ({'http_status':result.http_status} if getattr(result,'http_status',None) is not None else {})
                               for index,result in enumerate(judged) if isinstance(result,BaseException)],
                     created_at=now_utc()))
                 save(db,current)
             else:
-                assessment=aggregate_model_ratings(judged,fixed_panel)
                 elapsed={rating['model_id']:rating['seconds'] for rating in judged}
                 for rating in assessment['ratings']:
                     rating['seconds']=elapsed[rating['model_id']]
-                    rating['reported_model']=next(r['reported_model'] for r in judged if r['model_id']==rating['model_id'])
+                    original=next(r for r in judged if r['model_id']==rating['model_id'])
+                    rating.update(reported_model=original['reported_model'],raw_response=original.get('raw_response'),
+                        response_metadata=original.get('response_metadata'),reused=rating['model_id'] in cached)
                 assessment.update(evaluated_at=now_utc(),rubric_version=row['versions']['rubric'],
-                    evaluator_config=fixed_panel,panel_version=PANEL_VERSION,evaluation_batch_id=batch_id)
+                    evaluator_config=fixed_panel,evaluation_mode=fixed_mode,evaluation_batch_id=batch_id,
+                    submission_sha256=submission_hash,scoring_prompt_sha256=prompt_hash,scoring_prompt=prompt)
+                previous=current.get('assessment')
+                if previous and previous.get('evaluation_batch_id')!=batch_id:
+                    history=current.setdefault('assessment_history',[])
+                    if not any(item.get('evaluation_batch_id')==previous.get('evaluation_batch_id') for item in history):
+                        history.append(deepcopy(previous))
                 current.update(assessment=assessment,assessment_status='completed')
+                current['events'].append(dict(type='evaluation_completed',evaluation_batch_id=batch_id,
+                    evaluation_mode=fixed_mode,ratings=len(judged),reused_results=len(cached),
+                    new_calls=len(fixed_panel)-len(cached),created_at=now_utc()))
                 save(db,current)
+        if identity_error:
+            raise HTTPException(409,'评审协议或实际模型身份校验失败：'+identity_error)
         if errors:
             raise HTTPException(502,'部分AI模型评分失败或格式无效，未生成综合分；完整失败记录已保存，可重试')
         return assessment
@@ -585,9 +730,7 @@ def register_translation(app, settings, require_admin, optional_basic):
             active_backend=backend_status()
         rows=[r for r in select_purpose_records(all_rows,data_purpose(settings)) if r['cohort_id']==active_cohort and r['record_kind']=='participant']
         def in_current_batch(row):
-            assessment=row.get('assessment')
-            return bool(assessment and (data_purpose(settings)!=DEMONSTRATION_PURPOSE
-                or (active_batch is not None and assessment.get('evaluation_batch_id')==active_batch)))
+            return assessment_for_batch(row,active_batch) is not None
         cells=[]
         for band in ('low','medium','high'):
             for condition in CONDITIONS:
@@ -595,7 +738,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                 submitted=[r for r in group if r.get('ended_at')]
                 scored=[r for r in submitted if in_current_batch(r)]
                 cells.append(dict(band=band,condition=condition,n=len(group),submitted=len(submitted),scored=len(scored),
-                    mean_score=round(statistics.mean(r['assessment']['score'] for r in scored),2) if scored else None,
+                    mean_score=round(statistics.mean(assessment_for_batch(r,active_batch)['score'] for r in scored),2) if scored else None,
                     mean_turns=round(statistics.mean(sum(m['role']=='assistant' for m in r['messages']) for r in submitted),2) if submitted else None,
                     mean_seconds=round(statistics.mean(_seconds(r['created_at'],r['ended_at']) for r in submitted),2) if submitted else None))
         indexed={(c['band'],c['condition']):c for c in cells}
@@ -606,13 +749,29 @@ def register_translation(app, settings, require_admin, optional_basic):
             cohort_id=active_cohort,evaluation_batch_id=active_batch,
             counts=dict(total=len(rows),submitted=sum(bool(r.get('ended_at')) for r in rows),
                 scored=sum(in_current_batch(r) for r in rows),
-                needs_review=sum(in_current_batch(r) and bool(r['assessment'].get('needs_review')) for r in rows),
+                evaluating=sum(bool(r.get('evaluation_pending')) for r in rows),
+                evaluation_failed=sum(r.get('assessment_status')=='failed' for r in rows),
+                needs_review=sum(in_current_batch(r) and bool(assessment_for_batch(r,active_batch).get('needs_review')) for r in rows),
                 previews=sum(r['record_kind']=='researcher_preview' for r in all_rows),
                 other_cohorts=sum(r['cohort_id']!=active_cohort for r in all_rows)),cells=cells,
             gaps=[dict(condition=c,high_low_gap=difference('high',c,'low',c)) for c in CONDITIONS],
             effects=[dict(band=b,clarification_gain=difference(b,'A',b,'S')) for b in ('low','medium','high')],
             study_phase='baseline_fairness',
+            collection_methods=dict(Counter(normalized_provenance(r)['collection_method'] for r in rows)),
+            record_count_unit='sessions_not_independently_verified_people',
+            duration_scope='translation_session_after_questionnaire',
+            inference_scope='descriptive_record_comparison_not_causal_or_population_evidence',
             hypothesis_note='当前仅比较直接翻译与主动澄清，检验澄清收益是否因能力而异。每个比较单元至少2份真实模型评分才显示描述性差值；预期效应未写入评分。优化模块须待基线实证分析后另行设计和验证。')
+
+    @app.get('/api/admin/translation/data-audit')
+    def translation_data_audit(admin=Depends(require_admin)):
+        with connect(settings.database_path) as db:
+            rows=records(db)
+        report=audit_records(rows)
+        report.update(active_cohort_id=cohort_id,evaluation_mode=evaluation_mode,
+            evaluation_batch_id=current_evaluation_batch(),panel_ready=registry.snapshot()['panel']['ready'])
+        return Response(_dump(report),media_type='application/json',headers={
+            'Cache-Control':'no-store','Content-Disposition':'attachment; filename="translation-data-audit.json"'})
 
     @app.get('/api/admin/translation/export')
     def translation_export(format: Literal['json','csv']='json',kind: Literal['records','dialogue','ratings']='records',
@@ -623,34 +782,48 @@ def register_translation(app, settings, require_admin, optional_basic):
             data=[admin_row(r,True) for r in rows]
         elif kind=='dialogue':
             data=[dict(id=r['id'],condition=r['condition'],band=r['band'],record_kind=r['record_kind'],data_purpose=record_purpose(r),
+                       collection_method=normalized_provenance(r)['collection_method'],
+                       collection_batch_id=normalized_provenance(r).get('batch_id'),
                        cohort_id=r['cohort_id'],study_mode=r['study_mode'],**m) for r in rows for m in r['messages']]
         else:
             data=[]
             for r in rows:
-                assessment=r.get('assessment') or {}
-                for rating in assessment.get('ratings',[]):
+                assessments=[*r.get('assessment_history',[])]
+                if r.get('assessment'):
+                    assessments.append(r['assessment'])
+                for assessment in assessments:
+                  for rating in assessment.get('ratings',[]):
                     legacy='model_id' not in rating
                     ident=rating.get('model_id',rating.get('expert_id'))
                     totals=assessment.get('model_totals',assessment.get('expert_totals',{}))
                     trimmed=assessment.get('trimmed_model_ids',assessment.get('trimmed_expert_ids',[]))
                     data.append({**dict(id=r['id'],condition=r['condition'],band=r['band'],cohort_id=r['cohort_id'],
                         record_kind=r['record_kind'],data_purpose=record_purpose(r),study_mode=r['study_mode'],rubric_version=r['versions']['rubric']),
+                        'collection_method':normalized_provenance(r)['collection_method'],
+                        'collection_batch_id':normalized_provenance(r).get('batch_id'),
                         'evaluation_batch_id':assessment.get('evaluation_batch_id'),
+                        'evaluation_mode':assessment.get('evaluation_mode','distinct_models'),
+                        'independent_model_count':assessment.get('independent_model_count'),
+                        'session_count':assessment.get('session_count',len(assessment.get('ratings',[]))),
+                        'submission_sha256':assessment.get('submission_sha256'),
+                        'scoring_prompt_sha256':assessment.get('scoring_prompt_sha256'),
                         **rating,'total':totals.get(ident),'trimmed':ident in trimmed,
-                        'evaluation_type':'legacy-role-panel' if legacy else 'distinct-model-panel'})
+                        'evaluation_type':assessment.get('evaluation_type','legacy-role-panel' if legacy else 'distinct-model-panel')})
         filename=f'translation-{kind}.{format}'
         headers={'Content-Disposition':f'attachment; filename="{filename}"','Cache-Control':'no-store'}
         if format=='json':
             return Response(_dump(data),media_type='application/json',headers=headers)
         # Flat analysis fields plus serialized audit structures, preserving zero and null.
-        columns=(['id','created_at','ended_at','record_kind','data_purpose','study_mode','cohort_id','current_cohort','condition','band',
+        columns=(['id','created_at','ended_at','created_at_event','ended_at_event','duration_scope',
+                 'record_kind','data_purpose','collection_method','collection_batch_id','provenance','study_mode','cohort_id','current_cohort','condition','band',
                  'age_band','education_stage','undergraduate_year','eligibility_version','translation_experience',
                  'ability_score','assessment_status','evaluation_batch_id','score','needs_review','turns','duration_seconds','submission',
-                 'answers','self_answers','ability','feedback','assessment','versions','model_config'] if kind=='records'
-                 else ['id','condition','band','record_kind','data_purpose','cohort_id','study_mode','role','content','action','created_at'] if kind=='dialogue'
-                 else ['id','condition','band','record_kind','data_purpose','study_mode','cohort_id','rubric_version','evaluation_batch_id',
+                 'answers','self_answers','ability','feedback','assessment','assessment_history','versions','model_config'] if kind=='records'
+                 else ['id','condition','band','record_kind','data_purpose','collection_method','collection_batch_id','cohort_id','study_mode','role','content','action','created_at'] if kind=='dialogue'
+                 else ['id','condition','band','record_kind','data_purpose','collection_method','collection_batch_id','study_mode','cohort_id','rubric_version','evaluation_batch_id',
+                       'evaluation_mode','evaluation_type','independent_model_count','session_count','submission_sha256','scoring_prompt_sha256',
                        'model_id','label','model','base_url','weight','normalized_weight','scores','evidence',
-                       'critical_errors','total','trimmed','seconds','reported_model','evaluation_type','expert_id'])
+                       'critical_errors','total','trimmed','seconds','reported_model','response_metadata','raw_response','reused','expert_id'])
         buffer=io.StringIO(newline='')
         writer=csv.DictWriter(buffer,fieldnames=columns,extrasaction='ignore')
         writer.writeheader()

@@ -5,6 +5,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
 import json
 import os
 import stat
@@ -21,6 +22,7 @@ from app.translation_connections import ConnectionRegistry, JSONModelProvider, c
 from app.translation_quality import RUBRIC
 from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION
 from app.translation_model import parse_reply
+from app.translation_panel_quality import DISTINCT_MODE, REPEATED_MODE
 from test_flow import auth, settings
 from translation_multi_model_helpers import configure_panel, panel_models
 
@@ -388,3 +390,153 @@ def test_inflight_evaluation_keeps_old_provider_generation_when_configuration_is
     assert not any(item["model"].endswith("new-generation") for item in assessment["ratings"])
     row=client.get(f"/api/admin/translation/records/{sid}",headers=auth()).json()
     assert row["current_cohort"] is False and row["assessment"]["score"]==80
+
+
+def test_repeated_mode_clones_existing_dialogue_privately_without_overwriting_configured_judges(tmp_path):
+    registry=ConnectionRegistry(settings(tmp_path,'pilot'))
+    registry.update({'dialogue':{**registry.connections()['dialogue'],'model':'one-base-ai','api_key':SECRET},
+                     'judges':panel_models()})
+    original=registry.connections()
+    result=registry.update({'evaluation_mode':REPEATED_MODE,'evaluation_repetitions':7})
+    effective=registry.evaluation_connections()
+    assert result['evaluation_mode']==REPEATED_MODE and result['evaluation_repetitions']==7
+    assert result['panel']['ready'] and result['panel']['mode']==REPEATED_MODE
+    assert result['panel']['count']==7 and result['panel']['independent_model_count']==1
+    assert [item['id'] for item in effective]==[f'session-{index}' for index in range(1,8)]
+    assert all(item['model']=='one-base-ai' and item['weight']==1 and item['api_key']==SECRET for item in effective)
+    assert all(item['label']==f'评审会话{index}' for index,item in enumerate(effective,1))
+    assert SECRET not in json.dumps(result)
+    assert registry.connections()['judges']==original['judges']
+    assert len(result['configured_judges'])==5
+    effective[0]['api_key']='changed-only-in-return-value'
+    assert registry.evaluation_connections()[0]['api_key']==SECRET
+    assert registry.connections()['dialogue']['api_key']==SECRET
+    restarted=ConnectionRegistry(settings(tmp_path,'pilot'))
+    assert restarted.connections()['evaluation_mode']==REPEATED_MODE
+    assert restarted.connections()['evaluation_repetitions']==7
+    assert restarted.evaluation_connections()[0]['api_key']==SECRET
+    restored=registry.update({'evaluation_mode':DISTINCT_MODE})
+    assert restored['panel']['independent_model_count']==5 and len(restored['judges'])==5
+    assert registry.connections()['judges']==original['judges']
+
+
+@pytest.mark.parametrize('bad',[4,10,True,5.0,'5',None])
+def test_repeated_session_count_is_a_strict_bounded_integer(tmp_path,bad):
+    registry=ConnectionRegistry(settings(tmp_path))
+    original=registry.connections()
+    with pytest.raises(ValueError):
+        registry.update({'evaluation_mode':REPEATED_MODE,'evaluation_repetitions':bad})
+    assert registry.connections()==original
+
+
+@pytest.mark.parametrize('bad',['roles','',None,True,[]])
+def test_unknown_registry_evaluation_modes_cannot_silently_enable_repetition(tmp_path,bad):
+    registry=ConnectionRegistry(settings(tmp_path))
+    with pytest.raises(ValueError):
+        registry.update({'evaluation_mode':bad})
+    assert registry.connections()['evaluation_mode']==DISTINCT_MODE
+
+
+def test_repeated_mode_does_not_make_remote_missing_credentials_ready(tmp_path):
+    registry=ConnectionRegistry(settings(tmp_path,'pilot'))
+    result=registry.update({'evaluation_mode':REPEATED_MODE})
+    assert len(result['judges'])==5 and not result['panel']['ready']
+    assert '密钥' in result['panel']['error']
+
+
+def test_distinct_config_duplicate_model_rejection_is_not_disabled_by_active_repeated_mode(tmp_path):
+    registry=ConnectionRegistry(settings(tmp_path))
+    models=panel_models()
+    for model in models:model['model']='one-model'
+    with pytest.raises(ValueError):
+        registry.update({'evaluation_mode':REPEATED_MODE,'judges':models})
+    assert registry.connections()['evaluation_mode']==DISTINCT_MODE
+
+
+def test_check_repeated_judges_makes_five_fresh_requests_with_one_server_side_key(tmp_path,monkeypatch):
+    registry=ConnectionRegistry(settings(tmp_path,'pilot'))
+    registry.update({'dialogue':{**registry.connections()['dialogue'],'model':'one-base-ai','api_key':SECRET},
+                     'evaluation_mode':REPEATED_MODE})
+    requests=[]
+    def handler(request):
+        requests.append(request)
+        assert request.headers['authorization']=='Bearer '+SECRET
+        return httpx.Response(200,json={'id':f'probe-{len(requests)}','model':'one-base-ai',
+            'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15},
+            'choices':[{'finish_reason':'stop','message':{'content':'{"ok":true}'}}]})
+    patch_http(monkeypatch,handler)
+    result=asyncio.run(registry.check('judges'))
+    assert len(requests)==len(result['checks'])==5
+    assert {item['id'] for item in result['checks']}=={f'session-{i}' for i in range(1,6)}
+    payloads=[json.loads(request.content) for request in requests]
+    assert all(payload['model']=='one-base-ai' and len(payload['messages'])==2 for payload in payloads)
+    assert all(payload['messages']==payloads[0]['messages'] for payload in payloads)
+    assert all(item['ok'] and item['reported_model']=='one-base-ai' for item in result['checks'])
+    assert all(item['verified_at'] for item in result['judges'])
+    assert not result['model_api_verified']  # A judges-only check is not a dialogue request.
+    assert SECRET not in json.dumps(result)
+
+
+def test_response_metadata_contains_only_safe_provenance_and_final_content_hash(monkeypatch):
+    content='{"ok":true}'
+    patch_http(monkeypatch,lambda request:httpx.Response(200,json={
+        'id':'response-123','model':'actual-base','usage':{'prompt_tokens':12,'completion_tokens':4,'total_tokens':16,
+            'api_key':SECRET,'input_tokens':True,'output_tokens':-1},
+        'choices':[{'finish_reason':'stop','message':{'content':'  '+content+'  '}}]}))
+    async def run():
+        provider=JSONModelProvider(connection())
+        assert await provider.complete([{'role':'user','content':'probe'}])==content
+        metadata=provider.last_response_metadata
+        assert metadata==provider.response_metadata
+        assert metadata['id']=='response-123' and metadata['model']=='actual-base'
+        assert metadata['usage']=={'prompt_tokens':12,'completion_tokens':4,'total_tokens':16}
+        assert metadata['finish_reason']=='stop' and metadata['http_status']==200
+        assert metadata['content_sha256']==hashlib.sha256(content.encode()).hexdigest()
+        assert 'content' not in metadata and SECRET not in json.dumps(metadata)
+        metadata['usage']['prompt_tokens']=999
+        assert provider.last_response_metadata['usage']['prompt_tokens']==12
+    asyncio.run(run())
+
+
+def test_response_metadata_and_reported_model_are_isolated_for_concurrent_calls(monkeypatch):
+    async def handler(request):
+        marker=json.loads(request.content)['messages'][0]['content']
+        await asyncio.sleep(.01 if marker=='one' else 0)
+        return httpx.Response(200,json={'id':'response-'+marker,'model':'actual-'+marker,
+            'usage':{'total_tokens':1 if marker=='one' else 2},
+            'choices':[{'finish_reason':'stop','message':{'content':'{"marker":"'+marker+'"}'}}]})
+    patch_http(monkeypatch,handler)
+    async def run():
+        provider=JSONModelProvider(connection())
+        async def one(marker):
+            content=await provider.complete([{'role':'user','content':marker}])
+            await asyncio.sleep(.02 if marker=='two' else 0)
+            return content,provider.last_response_metadata,provider.last_response_model
+        results=await asyncio.gather(one('one'),one('two'))
+        for marker,(content,metadata,reported) in zip(('one','two'),results):
+            assert metadata['id']=='response-'+marker and metadata['model']==reported=='actual-'+marker
+            assert metadata['content_sha256']==hashlib.sha256(content.encode()).hexdigest()
+        assert provider.last_response_metadata=={} and provider.last_response_model is None
+    asyncio.run(run())
+
+
+def test_failed_call_drops_stale_previous_response_metadata_and_never_retains_error_body(monkeypatch):
+    count=0
+    def handler(request):
+        nonlocal count
+        count+=1
+        if count==1:
+            return httpx.Response(200,json={'id':'previous-response','model':'previous-model',
+                'choices':[{'finish_reason':'stop','message':{'content':'{"ok":true}'}}]})
+        return httpx.Response(401,text=SECRET)
+    patch_http(monkeypatch,handler)
+    async def run():
+        provider=JSONModelProvider(connection())
+        await provider.complete([{'role':'user','content':'first'}])
+        assert provider.last_response_metadata['id']=='previous-response'
+        with pytest.raises(ModelError):
+            await provider.complete([{'role':'user','content':'second'}])
+        assert provider.last_response_metadata=={'http_status':401}
+        assert provider.last_response_model is None
+        assert SECRET not in json.dumps(provider.last_response_metadata)
+    asyncio.run(run())

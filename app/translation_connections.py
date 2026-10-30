@@ -24,7 +24,8 @@ import httpx
 
 from .db import now_utc
 from .model import ModelError
-from .translation_panel_quality import MODEL_MIN, MODEL_MAX, validate_panel
+from .translation_panel_quality import (MODEL_MIN, MODEL_MAX, DISTINCT_MODE, REPEATED_MODE,
+    EVALUATION_MODES, validate_panel)
 
 
 _LOCAL = {'localhost','127.0.0.1','::1'}
@@ -97,8 +98,27 @@ class JSONModelProvider:
     """OpenAI-compatible chat API. Each instance belongs to one actual model."""
     def __init__(self, connection):
         self.connection=deepcopy(connection)
-        self.last_response_model=None
+        self._last_response_model=ContextVar(f'last_response_model_{id(self)}',default=None)
+        self._response_metadata=ContextVar(f'response_metadata_{id(self)}',default=None)
         self._format_retry_count=ContextVar(f'json_format_retry_count_{id(self)}',default=0)
+
+    @property
+    def last_response_model(self):
+        return self._last_response_model.get()
+
+    @last_response_model.setter
+    def last_response_model(self,value):
+        self._last_response_model.set(value)
+
+    @property
+    def response_metadata(self):
+        """Non-secret final-response provenance, scoped to the current task."""
+        return deepcopy(self._response_metadata.get() or {})
+
+    @property
+    def last_response_metadata(self):
+        """Compatibility name for the current task's last response metadata."""
+        return self.response_metadata
 
     @property
     def format_retry_count(self):
@@ -107,6 +127,8 @@ class JSONModelProvider:
 
     async def complete(self,messages,*,temperature=None):
         self._format_retry_count.set(0)
+        self._response_metadata.set({})
+        self.last_response_model=None
         cfg=self.connection
         endpoint=urlsplit(cfg['base_url'])
         host=endpoint.hostname
@@ -143,6 +165,7 @@ class JSONModelProvider:
                                 request_url=(f'{endpoint.scheme}://{endpoint.netloc}/api/chat' if native_ollama
                                              else cfg['base_url']+'/chat/completions')
                                 response=await client.post(request_url,json=payload,headers=headers)
+                                self._response_metadata.set({'http_status':response.status_code})
                                 response.raise_for_status()
                                 break
                             except httpx.HTTPError as exc:
@@ -183,6 +206,23 @@ class JSONModelProvider:
                         self.last_response_model=(reported if isinstance(reported,str)
                             and re.fullmatch(r'[A-Za-z0-9._:/@+\-]{1,240}',reported)
                             and not (cfg.get('api_key') and cfg['api_key'] in reported) else None)
+                        response_id=body.get('id')
+                        safe_id=(response_id if isinstance(response_id,str)
+                            and re.fullmatch(r'[A-Za-z0-9._:/@+\-]{1,240}',response_id)
+                            and not (cfg.get('api_key') and cfg['api_key'] in response_id) else None)
+                        raw_usage=body.get('usage')
+                        usage={key:value for key,value in (raw_usage.items() if isinstance(raw_usage,dict) else [])
+                            if key in {'prompt_tokens','completion_tokens','total_tokens','input_tokens','output_tokens'}
+                            and type(value) is int and 0 <= value <= 1_000_000_000}
+                        if native_ollama:
+                            for raw_key,key in (('prompt_eval_count','input_tokens'),('eval_count','output_tokens')):
+                                value=body.get(raw_key)
+                                if type(value) is int and 0 <= value <= 1_000_000_000:
+                                    usage[key]=value
+                        self._response_metadata.set(dict(id=safe_id,model=self.last_response_model,usage=usage,
+                            finish_reason=body.get('done_reason') if native_ollama else choice.get('finish_reason'),
+                            content_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(),
+                            http_status=response.status_code,json_format_retries=self.format_retry_count))
                         return content
         except (httpx.HTTPError,TimeoutError,ValueError,TypeError,KeyError) as exc:
             status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
@@ -208,15 +248,22 @@ class ConnectionRegistry:
             # They never contact a provider, and must not imply a verified API.
             default=clean_connection(dict(model='not-configured',label='演示未配置真实模型',
                 base_url='https://unconfigured.invalid/v1'),dialogue=True)
-        self.config=dict(dialogue=default,judges=[])
+        self.config=dict(dialogue=default,judges=[],evaluation_mode=DISTINCT_MODE,evaluation_repetitions=5)
         if self.path.exists():
             raw=json.loads(self.path.read_text(encoding='utf-8'))
             self.config=self._validated_update(raw,self.config)
 
     def _validated_update(self,body,previous):
-        if not isinstance(body,dict) or set(body)-{'dialogue','judges','version'}:
+        if not isinstance(body,dict) or set(body)-{'dialogue','judges','version','evaluation_mode','evaluation_repetitions'}:
             raise ValueError('模型配置字段无效')
         config=deepcopy(previous)
+        mode=body.get('evaluation_mode',previous.get('evaluation_mode',DISTINCT_MODE))
+        repetitions=body.get('evaluation_repetitions',previous.get('evaluation_repetitions',5))
+        if not isinstance(mode,str) or mode not in EVALUATION_MODES:
+            raise ValueError('评审模式须为distinct_models或repeated_sessions')
+        if type(repetitions) is not int or not MODEL_MIN <= repetitions <= MODEL_MAX:
+            raise ValueError(f'重复盲评会话数须为{MODEL_MIN}至{MODEL_MAX}之间的整数')
+        config.update(evaluation_mode=mode,evaluation_repetitions=repetitions)
         if 'dialogue' in body:
             config['dialogue']=clean_connection(body['dialogue'],previous.get('dialogue'),dialogue=True)
         if 'judges' in body:
@@ -255,6 +302,21 @@ class ConnectionRegistry:
         with self.lock:
             return deepcopy(self.config)
 
+    @staticmethod
+    def _evaluation_connections(config):
+        if config.get('evaluation_mode',DISTINCT_MODE)==REPEATED_MODE:
+            # Only server-side copies access the existing dialogue credential.
+            # Every entry is a new stateless request/context, not a new model.
+            return [dict(deepcopy(config['dialogue']),id=f'session-{index+1}',
+                         label=f'评审会话{index+1}',weight=1.0)
+                    for index in range(config.get('evaluation_repetitions',5))]
+        return deepcopy(config.get('judges',[]))
+
+    def evaluation_connections(self):
+        """Private effective panel; credentials never enter public snapshots."""
+        with self.lock:
+            return self._evaluation_connections(self.config)
+
     def identity(self,connection):
         # Secret fingerprints stay in process memory only; never serialized.
         return _fingerprint(connection)
@@ -278,22 +340,27 @@ class ConnectionRegistry:
                 return dict(**public_connection(c),api_key_configured=bool(c.get('api_key')),
                             verified_at=self.verifications.get(ident),reported_model=self.reported_models.get(ident),
                             last_error=self.errors.get(ident))
+            mode=config.get('evaluation_mode',DISTINCT_MODE)
+            effective=self._evaluation_connections(config)
             try:
-                validate_panel(config['judges'])
-                missing=[c['label'] for c in config['judges'] if urlsplit(c['base_url']).hostname not in _LOCAL and not c.get('api_key')]
+                validate_panel(effective,mode=mode)
+                missing=[c['label'] for c in effective if urlsplit(c['base_url']).hostname not in _LOCAL and not c.get('api_key')]
                 if missing:
                     raise ValueError('这些远程模型尚未填写密钥：'+'、'.join(missing))
                 ready=True;error=None
             except ValueError as exc:
                 ready=False;error=str(exc)
-            return dict(dialogue=public(config['dialogue']),judges=[public(c) for c in config['judges']],
-                panel=dict(ready=ready,minimum=MODEL_MIN,maximum=MODEL_MAX,error=error),
+            return dict(dialogue=public(config['dialogue']),judges=[public(c) for c in effective],
+                configured_judges=[public(c) for c in config['judges']],
+                evaluation_mode=mode,evaluation_repetitions=config.get('evaluation_repetitions',5),
+                panel=dict(ready=ready,minimum=MODEL_MIN,maximum=MODEL_MAX,error=error,mode=mode,count=len(effective),
+                           independent_model_count=1 if mode==REPEATED_MODE else len(effective)),
                 model_api_verified=bool(self.verifications.get(self.identity(config['dialogue'])))
                     and self.identity(config['dialogue']) not in self.errors)
 
     async def check(self,target='all'):
         config=self.connections()
-        selected=([config['dialogue']] if target in {'dialogue','all'} else [])+(config['judges'] if target in {'judges','all'} else [])
+        selected=([config['dialogue']] if target in {'dialogue','all'} else [])+(self._evaluation_connections(config) if target in {'judges','all'} else [])
         async def one(connection):
             started=time.monotonic()
             try:
@@ -307,6 +374,7 @@ class ConnectionRegistry:
                 self.mark_success(connection,provider.last_response_model)
                 return dict(id=connection['id'],model=connection['model'],ok=True,
                             reported_model=provider.last_response_model,
+                            response_metadata=provider.response_metadata,
                             verified_at=self.verifications[self.identity(connection)],seconds=round(time.monotonic()-started,3))
             except Exception as exc:
                 code=exc.code if isinstance(exc,ModelError) else 'invalid_probe'

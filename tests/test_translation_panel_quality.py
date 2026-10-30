@@ -1,5 +1,6 @@
 """Distinct-model completeness, identity and weighted trimmed aggregation."""
 from copy import deepcopy
+import hashlib
 import json
 import math
 
@@ -8,6 +9,7 @@ import pytest
 from app.translation_materials import TASK
 from app.translation_panel_quality import (
     MODEL_MIN, MODEL_MAX, PANEL_VERSION, aggregate_model_ratings, scoring_prompt, validate_panel,
+    REPEATED_PANEL_VERSION, DISTINCT_MODE, REPEATED_MODE, validate_response_identities,
 )
 from app.translation_quality import RUBRIC
 
@@ -191,3 +193,118 @@ def test_larger_panel_retains_all_but_two_models_and_keeps_provenance():
     assert len(result["included_model_ids"]) == 7
     assert len(result["ratings"]) == 9
     assert all(row["model"] == models[index]["model"] for index,row in enumerate(result["ratings"]))
+
+
+def repeated_panel(count=5):
+    return [{"id": f"session-{index+1}", "label": f"评审会话{index+1}",
+             "model": "one-base-model", "base_url": "https://same.example.invalid/v1", "weight": 1}
+            for index in range(count)]
+
+
+def repeated_ratings(values=(0, 60, 70, 80, 100)):
+    return [{**rating, "model_id": f"session-{index+1}"}
+            for index, rating in enumerate(ratings(values))]
+
+
+def test_default_distinct_prompt_keeps_frozen_baseline_bytes_and_version():
+    assert PANEL_VERSION == "multi-model-panel-v1"
+    assert hashlib.sha256(scoring_prompt(TASK).encode()).hexdigest() == "40d6499939c66040fdb8f4497c862a7b9bd54f5c4ca5215a8dad01b8ae7bbc57"
+    assert scoring_prompt(TASK) == scoring_prompt(TASK, mode=DISTINCT_MODE)
+
+
+def test_repeated_prompt_honestly_describes_one_model_and_all_five_dimensions():
+    prompt = scoring_prompt(TASK, mode=REPEATED_MODE)
+    assert "同一基础模型" in prompt and "独立的新上下文" in prompt
+    assert "不是不同AI专家团" in prompt and "不扮演不同专家角色" in prompt
+    assert "偏差必然抵消" in prompt and "其他评审模型" not in prompt
+    assert REPEATED_PANEL_VERSION in prompt and PANEL_VERSION not in prompt
+    assert all(dimension["id"] in prompt and dimension["description"] in prompt for dimension in RUBRIC)
+    assert TASK["source_text"] in prompt and TASK["reference_translation"] in prompt
+
+
+def test_repeated_is_explicit_opt_in_and_never_weakens_default_distinct_rejection():
+    with pytest.raises(ValueError):
+        validate_panel(repeated_panel())
+    assert len(validate_panel(repeated_panel(), mode=REPEATED_MODE)) == 5
+    with pytest.raises(ValueError):
+        aggregate_model_ratings(repeated_ratings(), repeated_panel())
+
+
+@pytest.mark.parametrize("mode", ["roles", "", None, True, []])
+def test_unknown_evaluation_modes_are_rejected(mode):
+    for operation in (lambda: validate_panel(panel(), mode=mode), lambda: scoring_prompt(TASK, mode=mode)):
+        with pytest.raises(ValueError):
+            operation()
+
+
+@pytest.mark.parametrize("mutation", ["model", "endpoint", "duplicate_id"])
+def test_repeated_panel_requires_one_actual_requested_model_endpoint_and_unique_session_ids(mutation):
+    models = repeated_panel()
+    if mutation == "model": models[1]["model"] = "different-model"
+    elif mutation == "endpoint": models[1]["base_url"] = "https://other.example.invalid/v1"
+    else: models[1]["id"] = models[0]["id"]
+    with pytest.raises(ValueError):
+        validate_panel(models, mode=REPEATED_MODE)
+
+
+@pytest.mark.parametrize("count", [4, 10])
+def test_repeated_panel_size_does_not_shrink_below_three_retained_sessions(count):
+    with pytest.raises(ValueError):
+        validate_panel(repeated_panel(count), mode=REPEATED_MODE)
+
+
+def test_repeated_aggregation_keeps_every_five_dimension_rating_and_trims_session_totals():
+    result = aggregate_model_ratings(repeated_ratings(), repeated_panel(), mode=REPEATED_MODE)
+    assert result["score"] == 70
+    assert result["evaluation_mode"] == REPEATED_MODE
+    assert result["independent_model_count"] == 1 and result["session_count"] == 5
+    assert result["evaluation_type"] == "same-model-repeated-blind-review"
+    assert result["method"] == "same-model-repeated-session-trimmed-weighted-mean"
+    assert result["panel_version"] == REPEATED_PANEL_VERSION
+    assert result["session_totals"] == result["model_totals"]
+    assert result["trimmed_session_ids"] == ["session-1", "session-5"]
+    assert result["included_session_ids"] == ["session-2", "session-3", "session-4"]
+    assert all(row["session_id"] == row["model_id"] for row in result["ratings"])
+    assert all(set(row["scores"]) == {dimension["id"] for dimension in RUBRIC} for row in result["ratings"])
+    assert "只有一个基础模型" in result["limitation"] and "不保证偏差抵消" in result["limitation"]
+
+
+def test_repeated_identical_actual_scores_stay_identical_without_manufactured_jitter():
+    result = aggregate_model_ratings(repeated_ratings((80,) * 5), repeated_panel(), mode=REPEATED_MODE)
+    assert result["score"] == 80 and result["sd"] == result["range"] == 0
+    assert set(result["session_totals"].values()) == {80}
+
+
+def test_repeated_uses_predeclared_weights_only_after_trimming():
+    models = repeated_panel()
+    for row, weight in zip(models, (999, 1, 2, 3, 999)): row["weight"] = weight
+    result = aggregate_model_ratings(repeated_ratings(), models, mode=REPEATED_MODE)
+    assert result["score"] == pytest.approx((60 + 70 * 2 + 80 * 3) / 6, abs=.01)
+    assert sum(row["normalized_weight"] for row in result["ratings"]) == pytest.approx(1)
+
+
+def test_distinct_response_aliases_routed_to_one_actual_model_are_rejected():
+    values = ratings()
+    for index, value in enumerate(values): value["reported_model"] = f"actual-{index}"
+    values[1]["reported_model"] = values[0]["reported_model"]
+    with pytest.raises(ValueError, match="重复的实际模型身份"):
+        validate_response_identities(values, panel())
+    with pytest.raises(ValueError):
+        aggregate_model_ratings(values, panel())
+
+
+def test_response_identity_checks_keep_missing_evidence_unverified_and_offer_strict_mode():
+    result = validate_response_identities(ratings(), panel())
+    assert result["response_identity_status"] == "incomplete" and result["reported_model_count"] == 0
+    with pytest.raises(ValueError, match="缺少完整"):
+        validate_response_identities(ratings(), panel(), require_reported=True)
+
+
+def test_repeated_response_identities_require_one_returned_model_and_read_metadata_fallback():
+    values = repeated_ratings()
+    for value in values: value["response_metadata"] = {"model": "actual-single-base"}
+    result = validate_response_identities(values, repeated_panel(), mode=REPEATED_MODE, require_reported=True)
+    assert result["response_identity_status"] == "complete" and result["reported_model_count"] == 1
+    values[2]["response_metadata"]["model"] = "actual-other-base"
+    with pytest.raises(ValueError, match="不同的实际模型身份"):
+        validate_response_identities(values, repeated_panel(), mode=REPEATED_MODE)
