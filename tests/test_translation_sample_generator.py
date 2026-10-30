@@ -349,7 +349,12 @@ def test_full_http_protocol_submits_the_exact_final_reply_and_resume_makes_no_ne
             self.poll_seconds = .1
             self.row = None
             self.writes = []
+            self.record_reads = []
         def request(self, method, path, payload=None, *, admin=False):
+            if path.startswith("/api/admin/translation/records/"):
+                assert method == "GET" and admin is True
+                assert path == "/api/admin/translation/records/fixture-session?raw=1"
+                self.record_reads.append(path)
             if method != "GET":
                 self.writes.append((method, path, deepcopy(payload)))
             if path == "/api/translation/start":
@@ -382,6 +387,7 @@ def test_full_http_protocol_submits_the_exact_final_reply_and_resume_makes_no_ne
     assert plan["submission"] == platform.row["submission"] == TRANSLATION
     assert [method for method, _, _ in platform.writes] == ["POST", "POST", "POST", "PUT", "POST"]
     assert platform.writes[0][1] == "/api/translation/start"
+    assert platform.record_reads
     assert all(not path.endswith("/evaluate") for _, path, _ in platform.writes)
     assert len(plan["rounds"]) == 2 and plan["rounds"][1]["reply"]["action"] == "answer"
     previous_writes = deepcopy(platform.writes)

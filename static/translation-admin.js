@@ -6,7 +6,7 @@
   const conditionName = value => conditions[value] || (value === "O" ? "O · 历史优化试跑（不纳入当前测试）" : value || "—");
   const dimensionNames = {accuracy: "语义准确", context: "语境与人物一致", fluency: "中文流畅", style: "文体与声音", completeness: "完整与克制"};
   const dimensionName = key => materials?.rubric?.find(item => item.id === key)?.label || dimensionNames[key] || key;
-  const statuses = {pending: "待统一评审", completed: "已评审", demo_unscored: "演示不评分", evaluating: "评审中", failed: "评审失败，可重试"};
+  const statuses = {pending: "待统一评审", completed: "已评审", demo_unscored: "未评分", evaluating: "评审中", failed: "评审失败，可重试"};
   let summary = null, records = [], materials = null, currentId = null, page = 0, refreshing = false;
   let modelConfiguration = null, judgeEditors = [], modelsBusy = false, modelsDirty = false, dialogueDirty = false;
   let batchBusy = false, batchStopRequested = false;
@@ -18,6 +18,7 @@
   const time = value => { if (!value) return "—"; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? "—" : new Intl.DateTimeFormat("zh-CN", {timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false}).format(parsed); };
   const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined && text !== null) node.textContent = text; if (className) node.className = className; return node; };
   const json = (method, body) => ({method, body: JSON.stringify(body)});
+  const auditJSON = value => JSON.stringify(value, (key, item) => ["study_mode", "run_mode", "runtime_mode"].includes(key) ? undefined : item, 2);
   async function api(path, options = {}) {
     const controller = new AbortController(), timeoutMs = path.endsWith("/evaluate") || path.endsWith("/models/check") ? 135000 : 30000;
     let timeout;
@@ -54,9 +55,9 @@
     $("effects").replaceChildren(table(["能力组", "主动澄清收益 A − S"], ["low", "medium", "high"].map(band => { const row = (summary.effects || []).find(item => item.band === band) || {}; return [bandNames[band], signed(row.clarification_gain)]; })));
     $("hypothesis-note").textContent = summary.hypothesis_note || "当前检验主动澄清收益是否随翻译能力不同而变化，结果未预设。针对性优化模块须在本阶段结果分析后另行设计。";
     $("admin-mode").hidden = false;
-    $("admin-mode").textContent = summary.study_mode === "demo" ? "演示模式 · 不调用真实模型、不生成译文质量评分。表格中的空白表示没有可用评分，不以模拟分数填充研究结果。" : summary.study_mode === "pilot" ? "预测试模式 · 对话和统一评审请求已配置的模型 API；配置与实际连通结果分别记录。当前使用候选研究材料，仅比较两组。" : "正式实验模式 · 当前只比较直接翻译与主动澄清。对话和统一评审请求已配置的模型 API；当前冻结版本和评审批次的翻译会话进入统计。";
-    if (summary.study_mode !== "demo") $("admin-mode").textContent += summary.model_api_verified ? " 本进程已记录成功 API 调用" + (summary.model_api_verified_at ? "（" + time(summary.model_api_verified_at) + "）" : "") + "。" : summary.model_api_verified_at ? " 此前已连通模型 API；最近一次调用未成功，请稍后重试。" : " 本进程尚未记录成功 API 调用。";
-    if (summary.study_mode !== "demo") $("admin-mode").textContent += summary.panel_ready ? repeatedEvaluation(summary) ? ` 同模型多会话重复评审配置完整（${summary.evaluation_session_count || summary.model_count || 0}个独立上下文会话）；会话使用同一模型，存在共同偏差。` : ` 评审团配置完整（${summary.model_count || 0}个不同模型）；各模型连通状态见“模型与 API”。` : " 评审配置尚未完整，不能生成综合质量分。请打开“模型与 API”配置评审方式。";
+    $("admin-mode").textContent = "当前只比较直接翻译与主动澄清。汇总当前配置的翻译会话及当前评审批次的完整评分。";
+    $("admin-mode").textContent += summary.model_api_verified ? " 本进程已记录成功 API 调用" + (summary.model_api_verified_at ? "（" + time(summary.model_api_verified_at) + "）" : "") + "。" : summary.model_api_verified_at ? " 此前已连通模型 API；最近一次调用未成功，请稍后重试。" : " 本进程尚未记录成功 API 调用。";
+    $("admin-mode").textContent += summary.panel_ready ? repeatedEvaluation(summary) ? ` 同模型多会话重复评审配置完整（${summary.evaluation_session_count || summary.model_count || 0}个独立上下文会话）；会话使用同一模型，存在共同偏差。` : ` 评审团配置完整（${summary.model_count || 0}个不同模型）；各模型连通状态见“模型与 API”。` : " 评审配置尚未完整，不能生成综合质量分。请打开“模型与 API”配置评审方式。";
     $("batch-evaluate-button").disabled = batchBusy || !summary.panel_ready || !summary.evaluation_batch_id;
     renderEvaluationProtocol(evaluationMode(summary));
   }
@@ -65,11 +66,11 @@
   }
   function renderRecords() {
     const filtered = filteredRecords(), pages = Math.max(1, Math.ceil(filtered.length / 15)); page = Math.min(page, pages - 1); $("record-count").textContent = `${filtered.length} 条记录`;
-    $("record-list").replaceChildren(table(["记录编号", "开始时间", "版本 / 运行模式", "类型", "能力组 / 得分", "条件", "对话轮数", "评审状态", "质量分", "操作"], filtered.slice(page * 15, page * 15 + 15).map(record => {
+    $("record-list").replaceChildren(table(["记录编号", "开始时间", "配置版本", "类型", "能力组 / 得分", "条件", "对话轮数", "评审状态", "质量分", "操作"], filtered.slice(page * 15, page * 15 + 15).map(record => {
       const id = el("span", record.id.slice(0, 8)); id.title = record.id;
       const state = el("span", record.needs_review ? "需复核" : record.ended_at ? statuses[record.assessment_status] || record.assessment_status : "任务进行中", record.needs_review ? "tag warning" : "tag");
       const button = el("button", "查看记录", "quiet"); button.addEventListener("click", () => openRecord(record.id));
-      return [id, time(record.created_at), `${record.current_cohort === false ? "历史配置" : "当前配置"} / ${record.study_mode || "—"}`, record.record_kind === "researcher_preview" ? "研究者试跑" : "翻译会话", `${bandNames[record.band] || record.band || "—"} / ${number(record.ability_score, 0)}`, conditionName(record.condition), integer(record.turns), state, number(record.score), button];
+      return [id, time(record.created_at), record.current_cohort === false ? "历史配置" : "当前配置", record.record_kind === "researcher_preview" ? "研究者试跑" : "翻译会话", `${bandNames[record.band] || record.band || "—"} / ${number(record.ability_score, 0)}`, conditionName(record.condition), integer(record.turns), state, number(record.score), button];
     }), {empty: records.length ? "没有符合筛选条件的记录。" : "还没有翻译研究记录。可通过研究者试跑检查完整流程。"}));
     $("record-pagination").hidden = filtered.length <= 15; $("records-prev").disabled = page === 0; $("records-next").disabled = page === pages - 1; $("records-page").textContent = `${page + 1} / ${pages}`;
   }
@@ -77,7 +78,7 @@
   function assessmentForBatch(record, batch) { return [record.active_assessment, record.assessment, ...(record.assessment_history || [])].find(assessment => assessment && assessment.evaluation_batch_id === batch); }
   function assessmentView(assessment) {
     const box = el("div");
-    if (!assessment || assessment.status === "pending" || assessment.status === "demo_unscored") { box.append(el("p", assessment?.status === "demo_unscored" ? "演示记录不生成质量评分。" : "尚未完成统一评审。", "muted")); return box; }
+    if (!assessment || assessment.status === "pending" || assessment.status === "demo_unscored") { box.append(el("p", assessment?.status === "demo_unscored" ? "该记录没有质量评分。" : "尚未完成统一评审。", "muted")); return box; }
     const result = assessment.result || assessment;
     if (result.score === undefined || result.score === null) { box.append(el("p", statuses[assessment.status] || "等待评分", "muted")); return box; }
     const multiModel = !!(result.model_totals || result.trimmed_model_ids || result.ratings?.some(rating => rating.model_id));
@@ -152,7 +153,7 @@
       const loaded = await api(`/api/admin/translation/records/${encodeURIComponent(id)}`); if (currentId !== id) return;
       const record = loaded.record || loaded; $("record-title").textContent = `记录 ${record.id || id}`; const box = $("detail-content");
       if (record.current_cohort === false) box.append(el("p", "历史版本或其他模型配置记录：不进入当前汇总，保留其原始问卷、对话与评分。", "notice warning"));
-      box.append(definition([["记录类型", record.record_kind === "researcher_preview" ? "研究者试跑" : "翻译会话"], ["交互条件", conditionName(record.condition)], ["能力组 / 客观题得分", `${bandNames[record.band] || record.band || "—"} / ${number(record.ability_score, 0)}`], ["翻译会话开始", time(record.created_at)], ["译文提交时间", time(record.ended_at)], ["翻译会话时长", typeof record.duration_seconds === "number" ? `${number(record.duration_seconds / 60)} 分钟` : "—"], ["运行模式", record.study_mode || summary?.study_mode || "—"]]));
+      box.append(definition([["记录类型", record.record_kind === "researcher_preview" ? "研究者试跑" : "翻译会话"], ["交互条件", conditionName(record.condition)], ["能力组 / 客观题得分", `${bandNames[record.band] || record.band || "—"} / ${number(record.ability_score, 0)}`], ["翻译会话开始", time(record.created_at)], ["译文提交时间", time(record.ended_at)], ["翻译会话时长", typeof record.duration_seconds === "number" ? `${number(record.duration_seconds / 60)} 分钟` : "—"]]));
       box.append(el("h3", "最终译文"), el("div", record.submission || "尚未提交", "record-submission"));
       const assessment = assessmentForBatch(record, summary?.evaluation_batch_id) || loaded.assessment || record.assessment;
       box.append(assessmentView(assessment));
@@ -163,7 +164,7 @@
         box.append(history);
       }
       const reassessment = !!(assessment && summary?.evaluation_batch_id && assessment.evaluation_batch_id !== summary.evaluation_batch_id);
-      if (record.ended_at && record.current_cohort !== false && (record.study_mode || summary?.study_mode) !== "demo" && ((record.assessment_status || assessment?.status) !== "completed" || reassessment)) {
+      if (record.ended_at && record.current_cohort !== false && summary?.study_mode !== "demo" && ((record.assessment_status || assessment?.status) !== "completed" || reassessment)) {
         const repeated = repeatedEvaluation(summary), label = reassessment ? "用当前批次重新评审（保留原结果）" : repeated ? "运行同模型多会话重复评审" : "运行多模型统一盲评";
         const actions = el("div", null, "detail-actions"), button = el("button", label, "primary"), hint = el("span", repeated ? "同一模型的每个新会话均评价全部五维，完整评分后统一入库。" : "不同模型均评价全部五维；全部模型评分完整后统一入库。", "muted small");
         button.disabled = batchBusy || summary?.panel_ready === false;
@@ -182,7 +183,7 @@
         timing.append(table(["回复轮次", "总耗时 / 秒"], replyEvents.map((event, index) => [index + 1, number(event.seconds, 2)])));
         timing.append(el("p", "用时与质量差值均按实际记录描述，不能单独证明公平性。当前测试未启用优化模块；历史试跑的完整过程仍保留在下方审计记录。", "admin-section-note")); box.append(timing);
       }
-      const audit = el("details", null, "materials-item"); audit.append(el("summary", "版本、问卷与过程审计"), el("pre", JSON.stringify(loaded, null, 2), "json-view")); box.append(audit);
+      const audit = el("details", null, "materials-item"); audit.append(el("summary", "版本、问卷与过程审计"), el("pre", auditJSON(loaded), "json-view")); box.append(audit);
       if (scroll) $("record-detail").scrollIntoView({block: "start"});
     } catch (error) { $("record-title").textContent = "记录读取失败"; $("detail-error").textContent = errorText(error); }
   }
@@ -193,7 +194,7 @@
       materials = await api("/api/admin/translation/materials");
       $("materials-status").textContent = `${materials.material_status || "候选研究材料，待审查与验证"} · ${materials.frozen ? "当前版本已冻结" + (materials.frozen_at ? "（" + time(materials.frozen_at) + "）" : "") : "当前版本未冻结"}`;
       const box = $("materials-content");
-      box.append(materialDetails("当前版本与模型配置", JSON.stringify({versions: materials.versions, model_config: materials.model_config, cohort_id: materials.cohort_id}, null, 2)));
+      box.append(materialDetails("当前版本与模型配置", auditJSON({versions: materials.versions, model_config: materials.model_config, cohort_id: materials.cohort_id})));
       box.append(materialDetails("两组交互策略", JSON.stringify({policies: materials.policies}, null, 2)));
       const task = materials.task || {}; box.append(materialDetails(task.title || "共同翻译任务", [task.instructions, "原文：\n" + task.source_text, "翻译委托：\n" + (typeof task.brief === "string" ? task.brief : JSON.stringify(task.brief))].filter(Boolean).join("\n\n"), true));
       const context = el("details", null, "materials-item"); context.append(el("summary", "补充语境、参考译文与关键评分点"));

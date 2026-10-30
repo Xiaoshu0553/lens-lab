@@ -32,7 +32,7 @@ function harness({admin = false, preview = false, stored = {}, fetch = () => { t
   });
   let source = fs.readFileSync(path.join(root, 'static', basename + '.js'), 'utf8');
   if (admin) source = source.replace('  refresh().then(() => { if (location.pathname === "/admin/instruments") showMaterials(); });', `
-    globalThis.hooks = {api, filteredRecords, assessmentView, showMaterials, renderRecords, renderSummary,
+    globalThis.hooks = {api, filteredRecords, assessmentView, showMaterials, renderRecords, renderSummary, openRecord,
       prime(data) { if (data.records) records = data.records; if (data.summary) summary = data.summary; }};`);
   else source = source.replace('  init();', `
     globalThis.hooks = {api, start, send, applyView, intakeReady, recover, schedulePoll,
@@ -119,6 +119,44 @@ test('current-cohort record view excludes old model scores until explicitly sele
   h.hooks.prime({records: [{id: 'current', current_cohort: true, score: 90}, {id: 'old-model', current_cohort: false, score: 99}]});
   assert.deepEqual(Array.from(h.hooks.filteredRecords(), record => record.id), ['current']);
   h.element('cohort-filter').value = 'historical'; assert.deepEqual(Array.from(h.hooks.filteredRecords(), record => record.id), ['old-model']);
+});
+
+test('admin record list shows configuration scope without reading record runtime mode', () => {
+  const h = harness({admin: true});
+  for (const id of ['cohort-filter', 'kind-filter', 'condition-filter', 'assessment-filter']) h.element(id).value = 'all';
+  const current = {id: 'current-record', current_cohort: true, record_kind: 'participant', condition: 'A'};
+  Object.defineProperty(current, 'study_mode', {get() { throw new Error('Record runtime mode must not be read'); }});
+  h.hooks.prime({records: [current, {id: 'historical-record', current_cohort: false, record_kind: 'researcher_preview', condition: 'S'}]});
+  h.hooks.renderRecords();
+  const rendered = allText(h.element('record-list'));
+  assert.match(rendered, /配置版本/); assert.match(rendered, /当前配置/); assert.match(rendered, /历史配置/);
+  assert.doesNotMatch(rendered, /运行模式|study_mode|pilot|live|demo/);
+});
+
+test('admin summary keeps API and evaluation details without runtime mode labels', () => {
+  const h = harness({admin: true});
+  for (const study_mode of ['demo', 'pilot', 'live']) {
+    h.hooks.prime({summary: {study_mode, model_api_verified: true, panel_ready: true, evaluation_mode: 'repeated_sessions', evaluation_session_count: 5, counts: {}, cells: [], gaps: [], effects: []}});
+    h.hooks.renderSummary();
+    const rendered = h.element('admin-mode').textContent;
+    assert.doesNotMatch(rendered, /运行模式|预测试模式|正式实验模式|演示模式|study_mode|pilot|live|demo/);
+    assert.match(rendered, /已记录成功 API 调用/); assert.match(rendered, /同模型多会话重复评审/);
+  }
+});
+
+test('admin detail omits nested runtime fields while preserving evaluation mode and current evaluation controls', async () => {
+  const record = {id: 'current-record', current_cohort: true, record_kind: 'participant', ended_at: '2026-10-30T01:00:00Z', study_mode: 'demo', assessment_status: 'pending', messages: [],
+    model_config: {study_mode: 'private-runtime-marker', evaluation_mode: 'repeated_sessions'}, events: [{type: 'start', runtime_mode: 'private-runtime-marker', run_mode: 'private-runtime-marker'}]};
+  const h = harness({admin: true, fetch: () => response({record})});
+  h.hooks.prime({summary: {study_mode: 'pilot', panel_ready: true, evaluation_mode: 'repeated_sessions'}});
+  await h.hooks.openRecord(record.id, false);
+  const rendered = allText(h.element('detail-content'));
+  assert.equal(h.element('detail-error').textContent, '');
+  assert.doesNotMatch(rendered, /运行模式|study_mode|run_mode|runtime_mode|private-runtime-marker|"demo"/);
+  assert.match(rendered, /evaluation_mode/); assert.match(rendered, /repeated_sessions/);
+  const evaluate = h.element('detail-content').querySelectorAll('button').find(button => button.textContent === '运行同模型多会话重复评审');
+  assert.ok(evaluate); assert.equal(evaluate.disabled, false);
+  assert.equal(record.study_mode, 'demo'); assert.equal(record.events[0].runtime_mode, 'private-runtime-marker');
 });
 
 test('expert detail reads weighted totals from the aggregate result', () => {

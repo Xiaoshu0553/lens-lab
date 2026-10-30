@@ -13,6 +13,7 @@ import uuid
 
 from fastapi.testclient import TestClient
 
+from app.db import connect
 from app.main import create_app
 from app.translation_materials import FORM_ITEMS, SELF_ITEMS, FORM_VERSION, TASK
 from app.translation_model import ACTIVE_CLARIFICATION_POLICY, dialogue_message_protocol, dialogue_prompt
@@ -346,7 +347,11 @@ def test_rating_exports_keep_totals_and_record_kind_without_technical_fields(tmp
     assert len(ratings) == 5
     assert all(row["record_kind"] == "researcher_preview" for row in ratings)
     assert_standard_export_fields(ratings)
-    assert _record(client, sid)["study_mode"] == "pilot"
+    assert 'study_mode' not in _record(client, sid)
+    with connect(app.state.settings.database_path) as db:
+        stored = json.loads(db.execute(
+            'SELECT record_json FROM translation_sessions WHERE id=?', (sid,)).fetchone()[0])
+    assert stored['study_mode'] == app.state.settings.study_mode == 'pilot'
     assert all(row["total"] == 80 for row in ratings)
     response = client.get("/api/admin/translation/export?kind=ratings&format=csv", headers=auth())
     rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))

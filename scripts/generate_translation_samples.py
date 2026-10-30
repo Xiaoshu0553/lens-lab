@@ -298,7 +298,7 @@ class Platform:
         return self.request("GET", f"/api/translation/session/{session_id}")
 
     def record(self, session_id: str) -> dict:
-        return self.request("GET", f"/api/admin/translation/records/{session_id}", admin=True)
+        return self.request("GET", f"/api/admin/translation/records/{session_id}?raw=1", admin=True)
 
     def start(self, payload: dict) -> dict:
         for attempt in range(3):

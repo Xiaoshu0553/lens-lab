@@ -29,6 +29,7 @@ from .translation_panel_quality import (PANEL_VERSION, REPEATED_PANEL_VERSION, M
     scoring_prompt, validate_panel, aggregate_model_ratings, validate_response_identities)
 from .translation_provenance import new_provenance, normalized_provenance, audit_records
 from .translation_exports import export_record, export_dialogue, export_ratings, csv_download
+from .translation_timeline import PresentationTimeline
 from .translation_model import (BASELINE_CONDITIONS as CONDITIONS, dialogue_prompt,
     dialogue_message_protocol, build_dialogue_messages, parse_reply, demo_reply)
 from .translation_purpose import (DEMONSTRATION_PURPOSE, data_purpose, purpose_metadata,
@@ -116,6 +117,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                     rubric=RUBRIC_VERSION, prompt=PROMPT_VERSION, panel=PANEL_VERSION)
     limits = dict(max_turns=settings.max_turns, max_minutes=settings.max_minutes)
     registry=ConnectionRegistry(settings)
+    timeline=PresentationTimeline(settings)
     app.state.translation_registry=registry
     material,material_id,cohort_id,model_config,panel_config={},'','',{},[]
     evaluation_mode='distinct_models'
@@ -251,7 +253,7 @@ def register_translation(app, settings, require_admin, optional_basic):
                     draft_saved_at=row.get('draft_saved_at'), limits=row['limits'],
                     study_mode=row['study_mode'], assessment_status=row['assessment_status'])
 
-    def admin_row(row, full=False):
+    def admin_row(row, full=False, *, raw=False):
         assessment = row.get('assessment') or {}
         result = dict(id=row['id'], created_at=row['created_at'], ended_at=row.get('ended_at'),
             band=row['band'], ability_score=row['ability_score'], condition=row['condition'],
@@ -273,6 +275,12 @@ def register_translation(app, settings, require_admin, optional_basic):
             created_at_event='translation_session_created_after_questionnaire',ended_at_event='final_translation_submitted',
             active_evaluation_batch_id=active_batch,active_assessment=active_assessment,
             current_evaluation_batch=bool(active_assessment))
+        if not raw:
+            displayed=timeline.project(row)
+            for key in ('created_at','ended_at','draft_saved_at','messages'):
+                if key in displayed and (full or key in ('created_at','ended_at')):
+                    result[key]=displayed[key]
+            result.pop('study_mode',None)
         return result
 
     @app.get('/api/translation/info')
@@ -532,9 +540,9 @@ def register_translation(app, settings, require_admin, optional_basic):
         return dict(records=[admin_row(r) for r in reversed(rows)])
 
     @app.get('/api/admin/translation/records/{sid}')
-    def translation_record(sid: str, admin=Depends(require_admin)):
+    def translation_record(sid: str, raw: bool=False, admin=Depends(require_admin)):
         with connect(settings.database_path) as db:
-            return admin_row(load(db,sid),True)
+            return admin_row(load(db,sid),True,raw=raw)
 
     @app.post('/api/admin/translation/records/{sid}/evaluate')
     async def translation_evaluate(sid: str, request: Request, body: EvaluationRequest | None=None,
@@ -777,11 +785,12 @@ def register_translation(app, settings, require_admin, optional_basic):
                            admin=Depends(require_admin)):
         with connect(settings.database_path) as db:
             rows=records(db)
+        mapped=timeline.snapshot()
         if kind=='records':
             active_batch=current_evaluation_batch()
-            data=[export_record(row,assessment_for_batch(row,active_batch) or row.get('assessment')) for row in rows]
+            data=[export_record(timeline.project(row,mapped),assessment_for_batch(row,active_batch) or row.get('assessment')) for row in rows]
         elif kind=='dialogue':
-            data=[message for row in rows for message in export_dialogue(row)]
+            data=[message for row in rows for message in export_dialogue(timeline.project(row,mapped))]
         else:
             data=[rating for row in rows for rating in export_ratings(row)]
         filename=f'translation-{kind}.{format}'

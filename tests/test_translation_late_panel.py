@@ -100,10 +100,15 @@ def test_24_completed_samples_keep_original_empty_panel_cohort_and_can_be_scored
         assert before['models'] == []
         sids = [complete_task(app, client) for _ in range(24)]
         original = record(client, sids[0])
+        assert 'study_mode' not in original
+        with connect(cfg.database_path) as db:
+            stored = json.loads(db.execute(
+                'SELECT record_json FROM translation_sessions WHERE id=?', (sids[0],)).fetchone()[0])
+        assert stored['study_mode'] == cfg.study_mode
         original_snapshot = deepcopy(original['material_snapshot'])
         # This is the exact pre-fix cohort formula, not a new compatibility ID.
         legacy_id = _hash(dict(material_id=_hash(original_snapshot), model=original['model_config'],
-            mode=original['study_mode'], limits=original['limits'], data_purpose='demonstration'))
+            mode=stored['study_mode'], limits=original['limits'], data_purpose='demonstration'))
         assert legacy_id == original['cohort_id'] == before['cohort_id']
         assert summary(client)['evaluation_batch_id'] is None
         assert evaluate(client, sids[0]).status_code == 409

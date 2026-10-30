@@ -71,7 +71,7 @@ test('unsaved cloud configuration is not silently discarded by a connection chec
 });
 
 test('incomplete panel cannot start multi-model evaluation from record detail', async () => {
-  const h = harness(() => reply({id: 'r1', ended_at: '2026-10-29T12:00:00Z', study_mode: 'pilot', current_cohort: true, assessment_status: 'pending', messages: []}));
+  const h = harness(() => reply({id: 'r1', ended_at: '2026-10-29T12:00:00Z', current_cohort: true, assessment_status: 'pending', messages: []}));
   await h.hooks.openRecord('r1', false);
   const buttons = h.element('detail-content').querySelectorAll('button'); const evaluate = buttons.find(button => button.textContent === '运行多模型统一盲评');
   assert.ok(evaluate); assert.equal(evaluate.disabled, true); assert.match(text(h.element('detail-content')), /至少5个不同模型/);
