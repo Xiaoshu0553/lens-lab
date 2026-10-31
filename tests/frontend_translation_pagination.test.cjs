@@ -113,13 +113,29 @@ test('invitation is never persisted when questionnaire stage and confirmations a
 });
 test('navigation buttons are explicit non-submit controls and shipped assets have a new cache version',()=>{
   for(const id of ['form-prev','form-next','start-task'])assert.match(html,new RegExp(`<button id="${id}" type="button"`));
-  assert.match(html,/translation\.js\?v=json-recovery-20261030/);assert.match(html,/translation\.css\?v=hitbox-20261030/);
+  assert.match(html,/translation\.js\?v=participant-status-20261031/);assert.match(html,/translation\.css\?v=hitbox-20261030/);
 });
 
 
-test('a failed recent call does not erase the fact that the API previously connected',async()=>{
-  const h=harness({currentInfo:{...info,model_api_verified:false,model_api_verified_at:'2026-10-29T16:59:36+00:00'}});await h.init();
-  assert.match(h.element('mode-banner').textContent,/此前已连通模型 API/);
-  assert.match(h.element('mode-banner').textContent,/最近一次调用未成功/);
-  assert.doesNotMatch(h.element('mode-banner').textContent,/尚未记录成功/);
+test('participant gets a useful failure notice without internal API process diagnostics',async()=>{
+  const h=harness({currentInfo:{...info,model_api_verified:false,model_api_verified_at:'2026-10-29T16:59:36+00:00',model_api_last_error:'provider_http_error'}});await h.init();
+  assert.equal(h.element('mode-banner').hidden,false);
+  assert.match(h.element('mode-banner').textContent,/最近一次请求未成功/);
+  assert.doesNotMatch(h.element('mode-banner').textContent,/预测试|本进程|候选研究材料|API/);
+});
+
+
+test('ready participant page hides internal runtime labels and connection bookkeeping',async()=>{
+  for(const study_mode of ['pilot','live'])for(const model_api_verified of [true,false]){
+    const h=harness({currentInfo:{...info,study_mode,ready:true,model_api_verified}});await h.init();
+    assert.equal(h.element('mode-banner').hidden,true);assert.equal(h.element('mode-banner').textContent,'');
+    assert.equal(h.element('intake-panel').hidden,false);
+  }
+});
+
+test('closed participant intake still explains that new tasks are unavailable',async()=>{
+  const h=harness({currentInfo:{...info,study_mode:'live',ready:false}});await h.init();
+  assert.equal(h.element('mode-banner').hidden,false);
+  assert.match(h.element('mode-banner').textContent,/暂不开放新任务/);
+  assert.doesNotMatch(h.element('mode-banner').textContent,/模式|冻结|API|本进程/);
 });
